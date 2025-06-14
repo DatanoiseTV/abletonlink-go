@@ -82,6 +82,7 @@ type MIDILinkBridge struct {
 	clockTimings           []time.Time // Recent clock arrival times
 	expectedClockInterval  time.Duration // Expected time between clocks
 	phaseOffset            time.Duration // Accumulated phase correction
+	manualPhaseOffset      time.Duration // Manual phase adjustment from UI
 	
 	// Feedback prevention
 	lastMIDITransportSource string // Track source of last transport change
@@ -444,23 +445,20 @@ func (b *MIDILinkBridge) updateLinkTempoWithPhaseAdjustment(bpm float64, clockTi
 	expectedInterval := time.Duration(float64(time.Minute) / (bpm * midiClocksPerQuarterNote))
 	b.expectedClockInterval = expectedInterval
 	
-	// Analyze jitter and calculate phase correction
+	// Analyze jitter and calculate phase correction for MIDI output timing
+	// But don't apply it to Link timeline to avoid tempo drift
 	phaseCorrection := b.calculatePhaseCorrection(clockTime)
 	
-	// Apply phase correction to the Link timeline
-	adjustedTime := uint64(currentTime) + uint64(phaseCorrection.Microseconds())
-	
+	// Update Link tempo WITHOUT phase adjustment to avoid drift
 	currentBeat := b.state.BeatAtTime(currentTime, defaultQuantum)
 	b.state.SetTempo(bpm, currentTime)
-	
-	// Use phase-adjusted time for more accurate beat alignment
-	b.state.ForceBeatAtTime(currentBeat, adjustedTime, defaultQuantum)
+	b.state.ForceBeatAtTime(currentBeat, uint64(currentTime), defaultQuantum)
 	
 	b.link.CommitAppSessionState(b.state)
 	
 	// Log phase adjustments (show all non-zero adjustments)
 	if phaseCorrection != 0 {
-		b.logInfo("Phase adjustment: %+.2fms (jitter compensation)", float64(phaseCorrection.Microseconds())/1000.0)
+		b.logInfo("Phase correction calculated: %+.2fms (for MIDI output timing)", float64(phaseCorrection.Microseconds())/1000.0)
 	}
 }
 
@@ -520,7 +518,10 @@ func (b *MIDILinkBridge) calculatePhaseCorrection(currentClock time.Time) time.D
 			float64(b.phaseOffset.Microseconds())/1000.0)
 	}
 	
-	return b.phaseOffset
+	// Include manual phase offset adjustment
+	totalOffset := b.phaseOffset + b.manualPhaseOffset
+	
+	return totalOffset
 }
 
 // syncMIDITransportToLink synchronizes MIDI transport to Link (external sync mode)
@@ -529,17 +530,21 @@ func (b *MIDILinkBridge) syncMIDITransportToLink(isPlaying bool, isContinue bool
 	currentTime := b.link.ClockMicros()
 	
 	if isPlaying {
+		// In external sync mode, MIDI is the master and Link must follow precisely
+		// We need to use ForceBeatAtTime to ensure Link follows MIDI timing exactly
 		if !isContinue {
-			// Use atomic operation to start transport and align to beat 0
-			// This ensures transport state and beat alignment happen together
-			b.state.SetIsPlayingAndRequestBeatAtTime(true, uint64(currentTime), 0.0, defaultQuantum)
-			b.logInfo("Link transport started from MIDI (start) - atomic beat 0 alignment")
+			// MIDI Start - force Link to beat 0
+			b.state.SetIsPlaying(true, uint64(currentTime))
+			// Force beat alignment - MIDI is master, Link must obey
+			b.state.ForceBeatAtTime(0.0, uint64(currentTime), defaultQuantum)
+			b.logInfo("Link transport started from MIDI (start) - forced beat 0")
 		} else {
-			// For continue, preserve current beat position
+			// MIDI Continue - preserve current beat position
 			currentBeat := b.state.BeatAtTime(currentTime, defaultQuantum)
-			// Use atomic operation to maintain beat continuity
-			b.state.SetIsPlayingAndRequestBeatAtTime(true, uint64(currentTime), currentBeat, defaultQuantum)
-			b.logInfo("Link transport continued from MIDI - preserved beat %.2f", currentBeat)
+			b.state.SetIsPlaying(true, uint64(currentTime))
+			// Force the current beat to maintain continuity
+			b.state.ForceBeatAtTime(currentBeat, uint64(currentTime), defaultQuantum)
+			b.logInfo("Link transport continued from MIDI - forced beat %.2f", currentBeat)
 		}
 	} else {
 		// Stop Link transport immediately
@@ -590,14 +595,19 @@ func (b *MIDILinkBridge) updateLinkTransport(isPlaying bool) {
 			nextHalfBar := float64(int(currentBeat/halfBarQuantum) + 1) * halfBarQuantum
 			nextHalfBarTime := b.state.TimeAtBeat(nextHalfBar, halfBarQuantum)
 			
-			// Set transport to start at the scheduled time
-			b.state.SetIsPlaying(true, uint64(nextHalfBarTime))
-			
-			// Request that the beat aligns properly when transport starts
-			// This ensures the beat grid is correctly aligned at transport start
-			b.state.RequestBeatAtStartPlayingTime(nextHalfBar, halfBarQuantum)
-			
-			b.logInfo("Link transport start quantized to beat %.1f at time %d with aligned beat grid", nextHalfBar, nextHalfBarTime)
+			// When Link is master (not external sync), use cooperative beat alignment
+			if !b.externalSyncEnabled {
+				// Set transport to start at the scheduled time
+				b.state.SetIsPlaying(true, uint64(nextHalfBarTime))
+				// Request that the beat aligns properly when transport starts
+				b.state.RequestBeatAtStartPlayingTime(nextHalfBar, halfBarQuantum)
+				b.logInfo("Link transport start quantized to beat %.1f at time %d with aligned beat grid", nextHalfBar, nextHalfBarTime)
+			} else {
+				// In external sync mode, this shouldn't be called but if it is, use forceful approach
+				b.state.SetIsPlaying(true, uint64(nextHalfBarTime))
+				b.state.ForceBeatAtTime(nextHalfBar, uint64(nextHalfBarTime), halfBarQuantum)
+				b.logInfo("Link transport start forced to beat %.1f at time %d (external sync)", nextHalfBar, nextHalfBarTime)
+			}
 			
 			// Schedule MIDI start message for the same half-bar boundary
 			b.mu.Lock()
@@ -867,7 +877,14 @@ func (b *MIDILinkBridge) midiClockSender() {
 			}
 			
 			// Get current beat position with MIDI clock quantum
-			currentBeat := b.state.BeatAtTime(currentTime, midiClockQuantum)
+			// Apply phase correction for MIDI timing (without affecting Link)
+			b.mu.Lock()
+			totalPhaseOffset := b.phaseOffset + b.manualPhaseOffset
+			b.mu.Unlock()
+			
+			// Adjust the time used for MIDI clock calculation
+			adjustedTime := currentTime + totalPhaseOffset.Microseconds()
+			currentBeat := b.state.BeatAtTime(adjustedTime, midiClockQuantum)
 			
 			// Check if it's time to send the next MIDI clock
 			if currentBeat >= nextClockBeat {
@@ -916,7 +933,9 @@ func (b *MIDILinkBridge) setupUI() {
 	// Create log view
 	b.logView = tview.NewTextView().
 		SetDynamicColors(true).
+		SetScrollable(true).
 		SetChangedFunc(func() {
+			b.logView.ScrollToEnd()
 			b.app.Draw()
 		})
 	b.logView.SetTitle(" Log Messages ").SetBorder(true)
@@ -1017,7 +1036,7 @@ func (b *MIDILinkBridge) updateStatsTable() {
 	}
 	
 	if phaseOffset != 0 {
-		b.statsTable.SetCell(row, 0, tview.NewTableCell("Phase Offset:").SetTextColor(tcell.ColorYellow))
+		b.statsTable.SetCell(row, 0, tview.NewTableCell("Auto Phase:").SetTextColor(tcell.ColorYellow))
 		offsetColor := tcell.ColorGreen
 		if abs(float64(phaseOffset.Microseconds())) > 1000 {
 			offsetColor = tcell.ColorRed
@@ -1026,9 +1045,28 @@ func (b *MIDILinkBridge) updateStatsTable() {
 		row++
 	}
 	
+	manualOffset := b.manualPhaseOffset
+	if manualOffset != 0 {
+		b.statsTable.SetCell(row, 0, tview.NewTableCell("Manual Phase:").SetTextColor(tcell.ColorYellow))
+		b.statsTable.SetCell(row, 1, tview.NewTableCell(fmt.Sprintf("%+.2fms", float64(manualOffset.Microseconds())/1000.0)).SetTextColor(tcell.ColorBlue))
+		row++
+	}
+	
+	// Show total phase offset if both auto and manual are present
+	if phaseOffset != 0 && manualOffset != 0 {
+		totalOffset := phaseOffset + manualOffset
+		b.statsTable.SetCell(row, 0, tview.NewTableCell("Total Phase:").SetTextColor(tcell.ColorYellow))
+		totalColor := tcell.ColorGreen
+		if abs(float64(totalOffset.Microseconds())) > 1000 {
+			totalColor = tcell.ColorRed
+		}
+		b.statsTable.SetCell(row, 1, tview.NewTableCell(fmt.Sprintf("%+.2fms", float64(totalOffset.Microseconds())/1000.0)).SetTextColor(totalColor))
+		row++
+	}
+	
 	// Instructions
 	row++
-	b.statsTable.SetCell(row, 0, tview.NewTableCell("Press 'q' to quit").SetTextColor(tcell.ColorDarkGray))
+	b.statsTable.SetCell(row, 0, tview.NewTableCell("Keys: +/- phase, r reset, space start/stop, q quit").SetTextColor(tcell.ColorDarkGray))
 }
 
 // uiUpdateLoop updates the UI periodically
@@ -1062,14 +1100,112 @@ func (b *MIDILinkBridge) runUI() error {
 	
 	// Set up key bindings
 	b.app.SetInputCapture(func(event *tcell.EventKey) *tcell.EventKey {
-		if event.Rune() == 'q' || event.Key() == tcell.KeyEscape {
+		switch {
+		case event.Rune() == 'q' || event.Key() == tcell.KeyEscape:
 			b.app.Stop()
+			return nil
+		case event.Rune() == '+' || event.Rune() == '=':
+			// Increase phase offset by 0.5ms
+			b.adjustManualPhaseOffset(500 * time.Microsecond)
+			return nil
+		case event.Rune() == '-':
+			// Decrease phase offset by 0.5ms
+			b.adjustManualPhaseOffset(-500 * time.Microsecond)
+			return nil
+		case event.Rune() == 'r' || event.Rune() == 'R':
+			// Reset manual phase offset
+			b.resetManualPhaseOffset()
+			return nil
+		case event.Rune() == ' ':
+			// Toggle transport start/stop
+			b.toggleTransport()
 			return nil
 		}
 		return event
 	})
 	
 	return b.app.Run()
+}
+
+// adjustManualPhaseOffset adjusts the manual phase offset
+func (b *MIDILinkBridge) adjustManualPhaseOffset(delta time.Duration) {
+	b.mu.Lock()
+	oldOffset := b.manualPhaseOffset
+	b.manualPhaseOffset += delta
+	
+	// Clamp to reasonable range (-30ms to +30ms)
+	maxOffset := 30 * time.Millisecond
+	if b.manualPhaseOffset > maxOffset {
+		b.manualPhaseOffset = maxOffset
+	} else if b.manualPhaseOffset < -maxOffset {
+		b.manualPhaseOffset = -maxOffset
+	}
+	b.mu.Unlock()
+	
+	b.logInfo("Manual phase offset: %+.2fms -> %+.2fms", 
+		float64(oldOffset.Microseconds())/1000.0,
+		float64(b.manualPhaseOffset.Microseconds())/1000.0)
+}
+
+// resetManualPhaseOffset resets the manual phase offset to zero
+func (b *MIDILinkBridge) resetManualPhaseOffset() {
+	b.mu.Lock()
+	oldOffset := b.manualPhaseOffset
+	b.manualPhaseOffset = 0
+	b.mu.Unlock()
+	
+	if oldOffset != 0 {
+		b.logInfo("Manual phase offset reset from %+.2fms to 0.0ms", 
+			float64(oldOffset.Microseconds())/1000.0)
+	}
+}
+
+// toggleTransport toggles the Link transport state
+func (b *MIDILinkBridge) toggleTransport() {
+	b.link.CaptureAppSessionState(b.state)
+	currentTime := b.link.ClockMicros()
+	isPlaying := b.state.IsPlaying()
+	
+	if !b.externalSyncEnabled {
+		// In Link master mode, control Link transport directly
+		if isPlaying {
+			// Stop transport
+			b.state.SetIsPlaying(false, uint64(currentTime))
+			b.logInfo("Transport stopped via spacebar")
+		} else {
+			// Start transport
+			if b.quantizeToBar {
+				// Use quantized start
+				b.updateLinkTransport(true)
+				b.logInfo("Transport start scheduled via spacebar (quantized)")
+				return // updateLinkTransport handles the commit
+			} else {
+				// Immediate start
+				b.state.SetIsPlaying(true, uint64(currentTime))
+				b.logInfo("Transport started via spacebar")
+			}
+		}
+		b.link.CommitAppSessionState(b.state)
+	} else {
+		// In external sync mode, send MIDI transport commands
+		if isPlaying {
+			// Send MIDI Stop
+			msg := []byte{0xFC}
+			if err := b.midiOut.SendMessage(msg); err != nil {
+				b.logInfo("Failed to send MIDI Stop: %v", err)
+			} else {
+				b.logInfo("MIDI Stop sent via spacebar")
+			}
+		} else {
+			// Send MIDI Start
+			msg := []byte{0xFA}
+			if err := b.midiOut.SendMessage(msg); err != nil {
+				b.logInfo("Failed to send MIDI Start: %v", err)
+			} else {
+				b.logInfo("MIDI Start sent via spacebar")
+			}
+		}
+	}
 }
 
 // logInfo logs an info message (will go to UI if enabled)
