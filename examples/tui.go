@@ -251,7 +251,7 @@ func (tui *TUIManager) updateStatusPanel() {
 	if externalSync {
 		mode = "[yellow]MIDI Master"
 	}
-	tui.statusPanel.SetCell(row, 0, tview.NewTableCell("Mode:").SetTextColor(tcell.ColorWhite))
+	tui.statusPanel.SetCell(row, 0, tview.NewTableCell("Mode:"))
 	tui.statusPanel.SetCell(row, 1, tview.NewTableCell(mode))
 	row++
 	
@@ -260,7 +260,7 @@ func (tui *TUIManager) updateStatusPanel() {
 	if linkPlaying {
 		linkStatus = "[green]Playing"
 	}
-	tui.statusPanel.SetCell(row, 0, tview.NewTableCell("Link:").SetTextColor(tcell.ColorWhite))
+	tui.statusPanel.SetCell(row, 0, tview.NewTableCell("Link:"))
 	tui.statusPanel.SetCell(row, 1, tview.NewTableCell(linkStatus))
 	row++
 	
@@ -268,7 +268,7 @@ func (tui *TUIManager) updateStatusPanel() {
 	if midiPlaying {
 		midiStatus = "[green]Playing"
 	}
-	tui.statusPanel.SetCell(row, 0, tview.NewTableCell("MIDI:").SetTextColor(tcell.ColorWhite))
+	tui.statusPanel.SetCell(row, 0, tview.NewTableCell("MIDI:"))
 	tui.statusPanel.SetCell(row, 1, tview.NewTableCell(midiStatus))
 	row++
 	
@@ -277,13 +277,13 @@ func (tui *TUIManager) updateStatusPanel() {
 	if startStopSync {
 		syncStatus = "[green]Enabled"
 	}
-	tui.statusPanel.SetCell(row, 0, tview.NewTableCell("Sync:").SetTextColor(tcell.ColorWhite))
+	tui.statusPanel.SetCell(row, 0, tview.NewTableCell("Sync:"))
 	tui.statusPanel.SetCell(row, 1, tview.NewTableCell(syncStatus))
 	row++
 	
 	// Clock count
 	if clockCount > 0 {
-		tui.statusPanel.SetCell(row, 0, tview.NewTableCell("Clocks:").SetTextColor(tcell.ColorWhite))
+		tui.statusPanel.SetCell(row, 0, tview.NewTableCell("Clocks:"))
 		tui.statusPanel.SetCell(row, 1, tview.NewTableCell(fmt.Sprintf("[cyan]%d", clockCount)))
 		row++
 	}
