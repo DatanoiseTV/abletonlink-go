@@ -2,11 +2,13 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"flag"
 	"fmt"
 	"log"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"strconv"
 	"sync"
 	"time"
@@ -91,12 +93,63 @@ type MIDILinkBridge struct {
 	app        *tview.Application
 	statsTable *tview.Table
 	logView    *tview.TextView
+	beatView   *tview.TextView
 	uiEnabled  bool
 	
 	// Context for shutdown
 	ctx    context.Context
 	cancel context.CancelFunc
 	
+	// Link start/stop sync state
+	startStopSyncEnabled bool
+	
+}
+
+// Config represents the saved configuration
+type Config struct {
+	ManualPhaseOffset time.Duration `json:"manual_phase_offset"`
+}
+
+// getConfigPath returns the path to the config file
+func getConfigPath() string {
+	homeDir, err := os.UserHomeDir()
+	if err != nil {
+		return "midi_bridge_config.json"
+	}
+	return filepath.Join(homeDir, ".midi_bridge_config.json")
+}
+
+// loadConfig loads the saved configuration
+func loadConfig() *Config {
+	configPath := getConfigPath()
+	data, err := os.ReadFile(configPath)
+	if err != nil {
+		// Config file doesn't exist or can't be read, return defaults
+		return &Config{ManualPhaseOffset: 0}
+	}
+	
+	var config Config
+	if err := json.Unmarshal(data, &config); err != nil {
+		// Invalid config file, return defaults
+		return &Config{ManualPhaseOffset: 0}
+	}
+	
+	return &config
+}
+
+// saveConfig saves the current configuration
+func (b *MIDILinkBridge) saveConfig() {
+	config := &Config{
+		ManualPhaseOffset: b.manualPhaseOffset,
+	}
+	
+	data, err := json.MarshalIndent(config, "", "  ")
+	if err != nil {
+		return
+	}
+	
+	configPath := getConfigPath()
+	os.WriteFile(configPath, data, 0644)
 }
 
 // NewMIDILinkBridge creates a new bridge instance
@@ -107,20 +160,29 @@ func NewMIDILinkBridge(initialTempo float64, externalSync bool, enableUI bool) (
 	
 	ctx, cancel := context.WithCancel(context.Background())
 	
+	// Load saved configuration
+	config := loadConfig()
+	
 	bridge := &MIDILinkBridge{
-		link:                link,
-		state:               state,
-		lastLinkTempo:       initialTempo,
-		lastMIDITempo:       0.0, // Will be set when first MIDI clock is received
-		quantizeToBar:       true,
-		beatsPerBar:         4,
-		externalSyncEnabled: externalSync,
-		tempoHistory:        make([]float64, 0, 4), // Keep last 4 readings
-		tempoHistorySize:    4,
-		clockTimings:        make([]time.Time, 0, 8), // Keep last 8 clock timings
-		uiEnabled:           enableUI,
-		ctx:                 ctx,
-		cancel:              cancel,
+		link:                 link,
+		state:                state,
+		lastLinkTempo:        initialTempo,
+		lastMIDITempo:        0.0, // Will be set when first MIDI clock is received
+		quantizeToBar:        true,
+		beatsPerBar:          4,
+		externalSyncEnabled:  externalSync,
+		tempoHistory:         make([]float64, 0, 4), // Keep last 4 readings
+		tempoHistorySize:     4,
+		clockTimings:         make([]time.Time, 0, 8), // Keep last 8 clock timings
+		manualPhaseOffset:    config.ManualPhaseOffset,
+		uiEnabled:            enableUI,
+		ctx:                  ctx,
+		cancel:               cancel,
+		startStopSyncEnabled: true, // Default to enabled
+	}
+	
+	if config.ManualPhaseOffset != 0 {
+		log.Printf("Loaded manual phase offset: %+.2fms", float64(config.ManualPhaseOffset.Microseconds())/1000.0)
 	}
 	
 	// Setup logging
@@ -152,7 +214,7 @@ func (b *MIDILinkBridge) Start() error {
 	
 	// Enable Link
 	b.link.Enable(true)
-	b.link.EnableStartStopSync(true)
+	b.link.EnableStartStopSync(b.startStopSyncEnabled)
 	
 	// Start background tasks
 	go b.midiClockSender()
@@ -176,6 +238,9 @@ func (b *MIDILinkBridge) Start() error {
 // Stop gracefully shuts down the bridge
 func (b *MIDILinkBridge) Stop() {
 	b.cancel()
+	
+	// Save configuration before shutdown
+	b.saveConfig()
 	
 	if b.midiIn != nil {
 		b.midiIn.Close()
@@ -940,9 +1005,19 @@ func (b *MIDILinkBridge) setupUI() {
 		})
 	b.logView.SetTitle(" Log Messages ").SetBorder(true)
 	
-	// Create main layout
+	// Create beat visualization view
+	b.beatView = tview.NewTextView().
+		SetDynamicColors(true).
+		SetTextAlign(tview.AlignCenter)
+	b.beatView.SetTitle(" Beat Visualization ").SetBorder(true)
+	
+	// Create main layout with three panels
+	leftPanel := tview.NewFlex().SetDirection(tview.FlexRow).
+		AddItem(b.statsTable, 0, 2, true).
+		AddItem(b.beatView, 8, 0, false)
+	
 	flex := tview.NewFlex().
-		AddItem(b.statsTable, 0, 1, true).
+		AddItem(leftPanel, 0, 1, true).
 		AddItem(b.logView, 0, 1, false)
 	
 	b.app.SetRoot(flex, true)
@@ -971,6 +1046,76 @@ func (w *uiLogWriter) Write(p []byte) (n int, err error) {
 	return len(p), nil
 }
 
+// updateBeatVisualization creates a visual representation of beat and phase
+func (b *MIDILinkBridge) updateBeatVisualization() {
+	if !b.uiEnabled || b.beatView == nil {
+		return
+	}
+	
+	b.link.CaptureAppSessionState(b.state)
+	currentTime := b.link.ClockMicros()
+	
+	// Get current musical position
+	currentBeat := b.state.BeatAtTime(currentTime, defaultQuantum)
+	phase := b.state.PhaseAtTime(currentTime, defaultQuantum)
+	
+	// Calculate bar and beat within bar
+	beatsPerBar := float64(b.beatsPerBar)
+	bar := int(currentBeat / beatsPerBar)
+	beatInBar := currentBeat - float64(bar)*beatsPerBar
+	
+	// Create visual beat indicator (4 beats per bar)
+	beatIndicator := ""
+	for i := 0; i < b.beatsPerBar; i++ {
+		if i == int(beatInBar) {
+			if b.linkIsPlaying {
+				// Animated beat indicator based on phase
+				if phase < 0.5 {
+					beatIndicator += "[red]●[white] "
+				} else {
+					beatIndicator += "[yellow]◐[white] "
+				}
+			} else {
+				beatIndicator += "[gray]●[white] "
+			}
+		} else {
+			beatIndicator += "[darkgray]○[white] "
+		}
+	}
+	
+	// Phase visualization (0.0 to 1.0 as a progress bar)
+	progressWidth := 20
+	progressFilled := int(phase * float64(progressWidth))
+	progressBar := "["
+	for i := 0; i < progressWidth; i++ {
+		if i < progressFilled {
+			progressBar += "[green]█[white]"
+		} else {
+			progressBar += "[darkgray]░[white]"
+		}
+	}
+	progressBar += "]"
+	
+	// Format the display
+	displayText := fmt.Sprintf(`[yellow]Bar %d[white]
+
+%s
+
+[cyan]Beat:[white] %.2f
+[cyan]Phase:[white] %.3f
+
+%s
+[cyan]%.1f%%[white]`,
+		bar+1, // Display 1-based bar numbers
+		beatIndicator,
+		beatInBar+1, // Display 1-based beat numbers
+		phase,
+		progressBar,
+		phase*100)
+	
+	b.beatView.SetText(displayText)
+}
+
 // updateStatsTable refreshes the stats display
 func (b *MIDILinkBridge) updateStatsTable() {
 	if !b.uiEnabled || b.statsTable == nil {
@@ -997,6 +1142,16 @@ func (b *MIDILinkBridge) updateStatsTable() {
 		mode = "MIDI Master"
 	}
 	b.statsTable.SetCell(row, 1, tview.NewTableCell(mode).SetTextColor(tcell.ColorWhite))
+	row++
+	
+	b.statsTable.SetCell(row, 0, tview.NewTableCell("Start/Stop Sync:").SetTextColor(tcell.ColorYellow))
+	syncStatus := "Disabled"
+	syncColor := tcell.ColorRed
+	if b.startStopSyncEnabled {
+		syncStatus = "Enabled"
+		syncColor = tcell.ColorGreen
+	}
+	b.statsTable.SetCell(row, 1, tview.NewTableCell(syncStatus).SetTextColor(syncColor))
 	row++
 	
 	b.statsTable.SetCell(row, 0, tview.NewTableCell("Link Tempo:").SetTextColor(tcell.ColorYellow))
@@ -1066,7 +1221,10 @@ func (b *MIDILinkBridge) updateStatsTable() {
 	
 	// Instructions
 	row++
-	b.statsTable.SetCell(row, 0, tview.NewTableCell("Keys: +/- phase, r reset, space start/stop, q quit").SetTextColor(tcell.ColorDarkGray))
+	b.statsTable.SetCell(row, 0, tview.NewTableCell("Keys: +/- phase, r reset, space start/stop, s sync, q quit").SetTextColor(tcell.ColorDarkGray))
+	
+	// Update beat visualization
+	b.updateBeatVisualization()
 }
 
 // uiUpdateLoop updates the UI periodically
@@ -1120,6 +1278,10 @@ func (b *MIDILinkBridge) runUI() error {
 			// Toggle transport start/stop
 			b.toggleTransport()
 			return nil
+		case event.Rune() == 's' || event.Rune() == 'S':
+			// Toggle Link start/stop sync
+			b.toggleStartStopSync()
+			return nil
 		}
 		return event
 	})
@@ -1145,6 +1307,9 @@ func (b *MIDILinkBridge) adjustManualPhaseOffset(delta time.Duration) {
 	b.logInfo("Manual phase offset: %+.2fms -> %+.2fms", 
 		float64(oldOffset.Microseconds())/1000.0,
 		float64(b.manualPhaseOffset.Microseconds())/1000.0)
+	
+	// Save config when phase offset changes
+	b.saveConfig()
 }
 
 // resetManualPhaseOffset resets the manual phase offset to zero
@@ -1157,6 +1322,24 @@ func (b *MIDILinkBridge) resetManualPhaseOffset() {
 	if oldOffset != 0 {
 		b.logInfo("Manual phase offset reset from %+.2fms to 0.0ms", 
 			float64(oldOffset.Microseconds())/1000.0)
+		// Save config when phase offset is reset
+		b.saveConfig()
+	}
+}
+
+// toggleStartStopSync toggles Link start/stop synchronization
+func (b *MIDILinkBridge) toggleStartStopSync() {
+	b.mu.Lock()
+	b.startStopSyncEnabled = !b.startStopSyncEnabled
+	newState := b.startStopSyncEnabled
+	b.mu.Unlock()
+	
+	b.link.EnableStartStopSync(newState)
+	
+	if newState {
+		b.logInfo("Link start/stop sync enabled")
+	} else {
+		b.logInfo("Link start/stop sync disabled")
 	}
 }
 
