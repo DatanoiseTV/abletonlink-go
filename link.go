@@ -5,7 +5,7 @@ package abletonlink
 
 /*
 #cgo CPPFLAGS: -I${SRCDIR}/vendor/link/include -I${SRCDIR}/vendor/link/extensions/abl_link/include
-#cgo LDFLAGS: -L${SRCDIR}/vendor/link/build -labl_link -lstdc++ -lpthread
+#cgo LDFLAGS: -L${SRCDIR}/vendor/link/build -labl_link -lstdc++ -lpthread -lm
 
 #include <abl_link.h>
 #include <stdlib.h>
