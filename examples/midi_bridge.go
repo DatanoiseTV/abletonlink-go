@@ -12,6 +12,9 @@ import (
 	"time"
 
 	"github.com/DatanoiseTV/abletonlink-go"
+	"github.com/gdamore/tcell/v2"
+	"github.com/rivo/tview"
+	"github.com/sirupsen/logrus"
 )
 
 const (
@@ -39,6 +42,7 @@ var (
 	midiOutPort       = flag.Int("midi-out-port", -1, "Physical MIDI output port number (use -list-ports to see available ports)")
 	initialTempo      = flag.Float64("tempo", 120.0, "Initial tempo in BPM")
 	enableExternalSync = flag.Bool("enable-external-sync", false, "Enable external MIDI clock/transport sync (MIDI controls Link)")
+	cuiMode           = flag.Bool("cui", false, "Enable console UI mode with real-time stats display")
 )
 
 // MIDILinkBridge provides bidirectional sync between MIDI clock and Ableton Link
@@ -82,6 +86,12 @@ type MIDILinkBridge struct {
 	// Feedback prevention
 	lastMIDITransportSource string // Track source of last transport change
 	
+	// TUI components
+	app        *tview.Application
+	statsTable *tview.Table
+	logView    *tview.TextView
+	uiEnabled  bool
+	
 	// Context for shutdown
 	ctx    context.Context
 	cancel context.CancelFunc
@@ -89,7 +99,7 @@ type MIDILinkBridge struct {
 }
 
 // NewMIDILinkBridge creates a new bridge instance
-func NewMIDILinkBridge(initialTempo float64, externalSync bool) (*MIDILinkBridge, error) {
+func NewMIDILinkBridge(initialTempo float64, externalSync bool, enableUI bool) (*MIDILinkBridge, error) {
 	// Create Link instance
 	link := abletonlink.NewLink(initialTempo)
 	state := abletonlink.NewSessionState()
@@ -107,12 +117,27 @@ func NewMIDILinkBridge(initialTempo float64, externalSync bool) (*MIDILinkBridge
 		tempoHistory:        make([]float64, 0, 4), // Keep last 4 readings
 		tempoHistorySize:    4,
 		clockTimings:        make([]time.Time, 0, 8), // Keep last 8 clock timings
+		uiEnabled:           enableUI,
 		ctx:                 ctx,
 		cancel:              cancel,
 	}
 	
+	// Setup logging
+	if enableUI {
+		// In UI mode, disable standard output logging
+		logrus.SetOutput(bridge.getLogWriter())
+		logrus.SetLevel(logrus.InfoLevel)
+	} else {
+		logrus.SetLevel(logrus.WarnLevel) // Reduce noise in CLI mode
+	}
+	
 	// Set up Link callbacks
 	bridge.setupLinkCallbacks()
+	
+	// Setup UI if enabled
+	if enableUI {
+		bridge.setupUI()
+	}
 	
 	return bridge, nil
 }
@@ -131,17 +156,17 @@ func (b *MIDILinkBridge) Start() error {
 	// Start background tasks
 	go b.midiClockSender()
 	
-	fmt.Printf("MIDI-Link Bridge started\n")
+	b.logInfo("MIDI-Link Bridge started")
 	if *midiInPort >= 0 || *midiOutPort >= 0 {
-		fmt.Printf("Using physical MIDI ports\n")
+		b.logInfo("Using physical MIDI ports")
 	} else {
-		fmt.Printf("Virtual MIDI ports: %s In/Out\n", virtualPortName)
+		b.logInfo("Virtual MIDI ports: %s In/Out", virtualPortName)
 	}
-	fmt.Printf("Initial tempo: %.2f BPM\n", b.lastLinkTempo)
+	b.logInfo("Initial tempo: %.2f BPM", b.lastLinkTempo)
 	if b.externalSyncEnabled {
-		fmt.Printf("External sync enabled: MIDI clock controls Link\n")
+		b.logInfo("External sync enabled: MIDI clock controls Link")
 	} else {
-		fmt.Printf("Internal sync: Link controls MIDI output\n")
+		b.logInfo("Internal sync: Link controls MIDI output")
 	}
 	
 	return nil
@@ -162,7 +187,9 @@ func (b *MIDILinkBridge) Stop() {
 	b.link.Destroy()
 	b.state.Destroy()
 	
-	fmt.Println("MIDI-Link Bridge stopped")
+	if !b.uiEnabled {
+		fmt.Println("MIDI-Link Bridge stopped")
+	}
 }
 
 // setupMIDI initializes MIDI input and output ports
@@ -181,14 +208,14 @@ func (b *MIDILinkBridge) setupMIDI() error {
 			inPort.Close()
 			return fmt.Errorf("failed to open physical MIDI input port %d: %w", *midiInPort, err)
 		}
-		fmt.Printf("Opened physical MIDI input port %d\n", *midiInPort)
+		b.logInfo("Opened physical MIDI input port %d", *midiInPort)
 	} else {
 		// Open virtual port
 		if err := inPort.OpenVirtualPort(virtualPortName + " In"); err != nil {
 			inPort.Close()
 			return fmt.Errorf("failed to open virtual MIDI input: %w", err)
 		}
-		fmt.Printf("Opened virtual MIDI input port: %s In\n", virtualPortName)
+		b.logInfo("Opened virtual MIDI input port: %s In", virtualPortName)
 	}
 	b.midiIn = inPort
 	
@@ -208,7 +235,7 @@ func (b *MIDILinkBridge) setupMIDI() error {
 			outPort.Close()
 			return fmt.Errorf("failed to open physical MIDI output port %d: %w", *midiOutPort, err)
 		}
-		fmt.Printf("Opened physical MIDI output port %d\n", *midiOutPort)
+		b.logInfo("Opened physical MIDI output port %d", *midiOutPort)
 	} else {
 		// Open virtual port
 		if err := outPort.OpenVirtualPort(virtualPortName + " Out"); err != nil {
@@ -216,7 +243,7 @@ func (b *MIDILinkBridge) setupMIDI() error {
 			outPort.Close()
 			return fmt.Errorf("failed to open virtual MIDI output: %w", err)
 		}
-		fmt.Printf("Opened virtual MIDI output port: %s Out\n", virtualPortName)
+		b.logInfo("Opened virtual MIDI output port: %s Out", virtualPortName)
 	}
 	b.midiOut = outPort
 	
@@ -233,7 +260,7 @@ func (b *MIDILinkBridge) setupMIDI() error {
 // setupLinkCallbacks configures Ableton Link callbacks
 func (b *MIDILinkBridge) setupLinkCallbacks() {
 	b.link.SetNumPeersCallback(func(numPeers uint64) {
-		fmt.Printf("Link peers: %d\n", numPeers)
+		b.logInfo("Link peers: %d", numPeers)
 	})
 	
 	b.link.SetTempoCallback(func(tempo float64) {
@@ -267,12 +294,12 @@ func (b *MIDILinkBridge) handleMIDIMessage(data []byte) {
 		case 0xF8:
 			// Don't log individual clocks to avoid spam
 		case 0xFA, 0xFB, 0xFC:
-			fmt.Printf("MIDI Transport received: 0x%02X (%s)\n", data[0], 
+			b.logInfo("MIDI Transport received: 0x%02X (%s)", data[0], 
 				map[byte]string{0xFA: "Start", 0xFB: "Continue", 0xFC: "Stop"}[data[0]])
 		default:
 			// Only log non-clock messages for debugging
 			if data[0] != 0xF8 {
-				fmt.Printf("Other MIDI message: 0x%02X (len: %d)\n", data[0], len(data))
+				b.logInfo("Other MIDI message: 0x%02X (len: %d)", data[0], len(data))
 			}
 		}
 	}
@@ -327,9 +354,9 @@ func (b *MIDILinkBridge) handleMIDIClock() {
 					b.lastMIDITempo = bpm
 					
 					if oldTempo == 0.0 {
-						fmt.Printf("MIDI tempo: %.1f BPM\n", bpm)
+						b.logInfo("MIDI tempo: %.1f BPM", bpm)
 					} else {
-						fmt.Printf("MIDI tempo: %.1f BPM (was %.1f)\n", bpm, oldTempo)
+						b.logInfo("MIDI tempo: %.1f BPM (was %.1f)", bpm, oldTempo)
 					}
 					
 					// Update Link tempo with phase adjustment if external sync is enabled
@@ -344,7 +371,7 @@ func (b *MIDILinkBridge) handleMIDIClock() {
 		// Start timing from first clock
 		b.lastMIDIClockTime = now
 		if b.externalSyncEnabled {
-			fmt.Printf("MIDI clock sync started\n")
+			b.logInfo("MIDI clock sync started")
 		}
 	}
 }
@@ -357,10 +384,10 @@ func (b *MIDILinkBridge) handleMIDIStart() {
 	b.mu.Unlock()
 	
 	if b.externalSyncEnabled {
-		fmt.Println("MIDI Start received - syncing to Link (external sync mode)")
+		b.logInfo("MIDI Start received - syncing to Link (external sync mode)")
 		b.syncMIDITransportToLink(true, false) // not continue
 	} else {
-		fmt.Println("MIDI Start received")
+		b.logInfo("MIDI Start received")
 	}
 }
 
@@ -372,10 +399,10 @@ func (b *MIDILinkBridge) handleMIDIStop() {
 	b.mu.Unlock()
 	
 	if b.externalSyncEnabled {
-		fmt.Println("MIDI Stop received - syncing to Link (external sync mode)")
+		b.logInfo("MIDI Stop received - syncing to Link (external sync mode)")
 		b.syncMIDITransportToLink(false, false)
 	} else {
-		fmt.Println("MIDI Stop received")
+		b.logInfo("MIDI Stop received")
 	}
 }
 
@@ -386,10 +413,10 @@ func (b *MIDILinkBridge) handleMIDIContinue() {
 	b.mu.Unlock()
 	
 	if b.externalSyncEnabled {
-		fmt.Println("MIDI Continue received - syncing to Link (external sync mode)")
+		b.logInfo("MIDI Continue received - syncing to Link (external sync mode)")
 		b.syncMIDITransportToLink(true, true) // is continue
 	} else {
-		fmt.Println("MIDI Continue received")
+		b.logInfo("MIDI Continue received")
 	}
 }
 
@@ -433,7 +460,7 @@ func (b *MIDILinkBridge) updateLinkTempoWithPhaseAdjustment(bpm float64, clockTi
 	
 	// Log phase adjustments (show all non-zero adjustments)
 	if phaseCorrection != 0 {
-		fmt.Printf("Phase adjustment: %+.2fms (jitter compensation)\n", float64(phaseCorrection.Microseconds())/1000.0)
+		b.logInfo("Phase adjustment: %+.2fms (jitter compensation)", float64(phaseCorrection.Microseconds())/1000.0)
 	}
 }
 
@@ -462,7 +489,7 @@ func (b *MIDILinkBridge) calculatePhaseCorrection(currentClock time.Time) time.D
 	
 	// Log jitter analysis when it's significant
 	if abs(float64(avgJitter.Microseconds())) > 500 { // > 0.5ms
-		fmt.Printf("Clock jitter detected: %+.2fms avg over %d intervals\n", 
+		b.logInfo("Clock jitter detected: %+.2fms avg over %d intervals", 
 			float64(avgJitter.Microseconds())/1000.0, jitterCount)
 	}
 	
@@ -477,7 +504,7 @@ func (b *MIDILinkBridge) calculatePhaseCorrection(currentClock time.Time) time.D
 	
 	// Log when we're clamping the correction
 	if avgJitter != originalJitter {
-		fmt.Printf("Phase correction clamped: %+.2fms -> %+.2fms\n", 
+		b.logInfo("Phase correction clamped: %+.2fms -> %+.2fms", 
 			float64(originalJitter.Microseconds())/1000.0,
 			float64(avgJitter.Microseconds())/1000.0)
 	}
@@ -488,7 +515,7 @@ func (b *MIDILinkBridge) calculatePhaseCorrection(currentClock time.Time) time.D
 	
 	// Log phase offset changes
 	if abs(float64(b.phaseOffset.Microseconds()-oldOffset.Microseconds())) > 100 { // > 0.1ms change
-		fmt.Printf("Phase offset updated: %+.2fms -> %+.2fms\n", 
+		b.logInfo("Phase offset updated: %+.2fms -> %+.2fms", 
 			float64(oldOffset.Microseconds())/1000.0,
 			float64(b.phaseOffset.Microseconds())/1000.0)
 	}
@@ -502,30 +529,47 @@ func (b *MIDILinkBridge) syncMIDITransportToLink(isPlaying bool, isContinue bool
 	currentTime := b.link.ClockMicros()
 	
 	if isPlaying {
-		// Force the Link session to align with MIDI timing when starting
-		// Calculate the current beat position based on MIDI clock timing
-		currentBeat := b.state.BeatAtTime(currentTime, defaultQuantum)
-		
-		// If this is a fresh start (not continue), align to beat 0
 		if !isContinue {
-			// Force beat 0 at the current time - MIDI Start resets the timeline
-			b.state.ForceBeatAtTime(0.0, uint64(currentTime), defaultQuantum)
+			// Use atomic operation to start transport and align to beat 0
+			// This ensures transport state and beat alignment happen together
+			b.state.SetIsPlayingAndRequestBeatAtTime(true, uint64(currentTime), 0.0, defaultQuantum)
+			b.logInfo("Link transport started from MIDI (start) - atomic beat 0 alignment")
 		} else {
-			// For continue, maintain current beat position
-			b.state.ForceBeatAtTime(currentBeat, uint64(currentTime), defaultQuantum)
+			// For continue, preserve current beat position
+			currentBeat := b.state.BeatAtTime(currentTime, defaultQuantum)
+			// Use atomic operation to maintain beat continuity
+			b.state.SetIsPlayingAndRequestBeatAtTime(true, uint64(currentTime), currentBeat, defaultQuantum)
+			b.logInfo("Link transport continued from MIDI - preserved beat %.2f", currentBeat)
 		}
-		
-		b.state.SetIsPlaying(true, uint64(currentTime))
-		fmt.Printf("Link transport started from MIDI (%s) - forced beat alignment\n", func() string {
-			if isContinue {
-				return "continue"
-			}
-			return "start"
-		}())
 	} else {
 		// Stop Link transport immediately
 		b.state.SetIsPlaying(false, uint64(currentTime))
-		fmt.Printf("Link transport stopped from MIDI\n")
+		b.logInfo("Link transport stopped from MIDI")
+	}
+	
+	b.link.CommitAppSessionState(b.state)
+}
+
+// ensurePhaseCoherentTransport ensures MIDI and Link maintain phase coherence during transport changes
+func (b *MIDILinkBridge) ensurePhaseCoherentTransport(isPlaying bool, scheduleTime uint64) {
+	b.link.CaptureAppSessionState(b.state)
+	
+	if isPlaying {
+		// Calculate the beat at the scheduled start time
+		scheduledBeat := b.state.BeatAtTime(int64(scheduleTime), defaultQuantum)
+		
+		// Ensure the beat is aligned to a musically meaningful boundary
+		alignedBeat := float64(int(scheduledBeat)) // Align to beat boundary
+		
+		// Use atomic operation to ensure transport and beat are set together
+		b.state.SetIsPlayingAndRequestBeatAtTime(true, scheduleTime, alignedBeat, defaultQuantum)
+		
+		// Calculate MIDI clock alignment
+		midiClockBeat := alignedBeat * float64(midiClocksPerQuarterNote)
+		
+		b.logInfo("Phase-coherent transport: Link beat %.1f, MIDI clock %d", alignedBeat, int(midiClockBeat))
+	} else {
+		b.state.SetIsPlaying(false, scheduleTime)
 	}
 	
 	b.link.CommitAppSessionState(b.state)
@@ -546,8 +590,14 @@ func (b *MIDILinkBridge) updateLinkTransport(isPlaying bool) {
 			nextHalfBar := float64(int(currentBeat/halfBarQuantum) + 1) * halfBarQuantum
 			nextHalfBarTime := b.state.TimeAtBeat(nextHalfBar, halfBarQuantum)
 			
-			b.state.SetIsPlaying(isPlaying, uint64(nextHalfBarTime))
-			fmt.Printf("Link transport start quantized to beat %.1f at time %d\n", nextHalfBar, nextHalfBarTime)
+			// Set transport to start at the scheduled time
+			b.state.SetIsPlaying(true, uint64(nextHalfBarTime))
+			
+			// Request that the beat aligns properly when transport starts
+			// This ensures the beat grid is correctly aligned at transport start
+			b.state.RequestBeatAtStartPlayingTime(nextHalfBar, halfBarQuantum)
+			
+			b.logInfo("Link transport start quantized to beat %.1f at time %d with aligned beat grid", nextHalfBar, nextHalfBarTime)
 			
 			// Schedule MIDI start message for the same half-bar boundary
 			b.mu.Lock()
@@ -560,7 +610,7 @@ func (b *MIDILinkBridge) updateLinkTransport(isPlaying bool) {
 			b.scheduledMIDIStop = nil // Clear any pending stop
 			b.mu.Unlock()
 			
-			fmt.Printf("Scheduled MIDI %s for time %d (in %.1f ms)\n", 
+			b.logInfo("Scheduled MIDI %s for time %d (in %.1f ms)", 
 				func() string {
 					if wasPreviouslyPlaying {
 						return "Continue"
@@ -581,7 +631,7 @@ func (b *MIDILinkBridge) updateLinkTransport(isPlaying bool) {
 			b.scheduledMIDIStart = nil // Clear any pending start
 			b.mu.Unlock()
 			
-			fmt.Printf("Scheduled MIDI Stop for immediate delivery\n")
+			b.logInfo("Scheduled MIDI Stop for immediate delivery")
 		}
 	} else {
 		b.state.SetIsPlaying(isPlaying, uint64(currentTime))
@@ -619,31 +669,54 @@ func (b *MIDILinkBridge) scheduleLinkTransportChange(isPlaying bool) {
 	defer b.mu.Unlock()
 	
 	if b.quantizeToBar && isPlaying {
-		// Quantize to half-bar boundaries to wait at most half a bar
-		quantum := defaultQuantum * float64(b.beatsPerBar)
-		halfBarQuantum := quantum / 2.0  // Half-bar quantum
+		// Check if Link has already scheduled a quantized transport start
+		// This gives us more accurate timing information
+		transportTime := b.state.TimeForIsPlaying()
 		
-		currentBeat := b.state.BeatAtTime(currentTime, halfBarQuantum)
-		// Find next half-bar boundary
-		nextHalfBar := float64(int(currentBeat/halfBarQuantum) + 1) * halfBarQuantum
-		targetTime := b.state.TimeAtBeat(nextHalfBar, halfBarQuantum)
-		
-		// Schedule MIDI start message for the half-bar boundary
-		wasPreviouslyPlaying := b.linkIsPlaying
-		b.scheduledMIDIStart = &scheduledTransport{
-			isPlaying:    true,
-			scheduleTime: uint64(targetTime),
-			isContinue:   wasPreviouslyPlaying,
+		if transportTime > uint64(currentTime) {
+			// Link has a future transport start scheduled, use that timing
+			scheduledBeat := b.state.BeatAtTime(int64(transportTime), defaultQuantum)
+			
+			wasPreviouslyPlaying := b.linkIsPlaying
+			b.scheduledMIDIStart = &scheduledTransport{
+				isPlaying:    true,
+				scheduleTime: transportTime,
+				isContinue:   wasPreviouslyPlaying,
+			}
+			b.scheduledMIDIStop = nil
+			
+			b.logInfo("Scheduled MIDI %s to match Link transport at beat %.1f, time %d (in %.1f ms)", 
+				func() string {
+					if wasPreviouslyPlaying {
+						return "Continue"
+					}
+					return "Start"
+				}(), scheduledBeat, transportTime, float64(int64(transportTime)-currentTime)/1000.0)
+		} else {
+			// No future transport scheduled, quantize ourselves
+			quantum := defaultQuantum * float64(b.beatsPerBar)
+			halfBarQuantum := quantum / 2.0
+			
+			currentBeat := b.state.BeatAtTime(currentTime, halfBarQuantum)
+			nextHalfBar := float64(int(currentBeat/halfBarQuantum) + 1) * halfBarQuantum
+			targetTime := b.state.TimeAtBeat(nextHalfBar, halfBarQuantum)
+			
+			wasPreviouslyPlaying := b.linkIsPlaying
+			b.scheduledMIDIStart = &scheduledTransport{
+				isPlaying:    true,
+				scheduleTime: uint64(targetTime),
+				isContinue:   wasPreviouslyPlaying,
+			}
+			b.scheduledMIDIStop = nil
+			
+			b.logInfo("Scheduled MIDI %s for beat %.1f at time %d (in %.1f ms, half-bar quantized)", 
+				func() string {
+					if wasPreviouslyPlaying {
+						return "Continue"
+					}
+					return "Start"
+				}(), nextHalfBar, targetTime, float64(int64(targetTime)-currentTime)/1000.0)
 		}
-		b.scheduledMIDIStop = nil // Clear any pending stop
-		
-		fmt.Printf("Scheduled MIDI %s for beat %.1f at time %d (in %.1f ms, half-bar quantized)\n", 
-			func() string {
-				if wasPreviouslyPlaying {
-					return "Continue"
-				}
-				return "Start"
-			}(), nextHalfBar, targetTime, float64(int64(targetTime)-int64(currentTime))/1000.0)
 	} else if isPlaying {
 		// Immediate start (no quantization)
 		wasPreviouslyPlaying := b.linkIsPlaying
@@ -654,7 +727,7 @@ func (b *MIDILinkBridge) scheduleLinkTransportChange(isPlaying bool) {
 		}
 		b.scheduledMIDIStop = nil
 		
-		fmt.Printf("Scheduled immediate MIDI %s\n", func() string {
+		b.logInfo("Scheduled immediate MIDI %s", func() string {
 			if wasPreviouslyPlaying {
 				return "Continue"
 			}
@@ -669,7 +742,7 @@ func (b *MIDILinkBridge) scheduleLinkTransportChange(isPlaying bool) {
 		}
 		b.scheduledMIDIStart = nil // Clear any pending start
 		
-		fmt.Printf("Scheduled immediate MIDI Stop\n")
+		b.logInfo("Scheduled immediate MIDI Stop")
 	}
 }
 
@@ -705,13 +778,30 @@ func (b *MIDILinkBridge) midiClockSender() {
 			if !b.externalSyncEnabled {
 				// Detect Link transport changes from external sources (other Link apps)
 				if isPlaying != lastLinkPlaying || (transportTime != lastTransportTime && transportTime > lastTransportTime) {
+					// Calculate timing difference for precise scheduling
+					timeDiff := int64(transportTime) - int64(currentTime)
+					
 					if isPlaying && !lastLinkPlaying {
-						// Link started from external source - schedule MIDI start
-						fmt.Printf("Link external transport start detected - scheduling MIDI output\n")
-						b.scheduleLinkTransportChange(true)
+						// Link started from external source
+						b.logInfo("Link external transport start detected - will occur in %.1fms", float64(timeDiff)/1000.0)
+						
+						if timeDiff > 0 {
+							// Transport start is in the future, schedule MIDI to coincide
+							b.mu.Lock()
+							b.scheduledMIDIStart = &scheduledTransport{
+								isPlaying:    true,
+								scheduleTime: transportTime, // Use exact Link transport time
+								isContinue:   lastLinkPlaying, // Was previously playing
+							}
+							b.scheduledMIDIStop = nil
+							b.mu.Unlock()
+						} else {
+							// Transport already started, send MIDI immediately
+							b.scheduleLinkTransportChange(true)
+						}
 					} else if !isPlaying && lastLinkPlaying {
 						// Link stopped from external source - schedule MIDI stop
-						fmt.Printf("Link external transport stop detected - scheduling MIDI output\n")
+						b.logInfo("Link external transport stop detected - scheduling MIDI output")
 						b.scheduleLinkTransportChange(false)
 					}
 					lastLinkPlaying = isPlaying
@@ -730,7 +820,7 @@ func (b *MIDILinkBridge) midiClockSender() {
 					log.Printf("Failed to send scheduled MIDI Stop: %v", err)
 				} else {
 					timeDiff := int64(currentTime) - int64(b.scheduledMIDIStop.scheduleTime)
-					fmt.Printf("MIDI transport sent: Stop at time %d (scheduled: %d, diff: %.1f ms)\n", 
+					b.logInfo("MIDI transport sent: Stop at time %d (scheduled: %d, diff: %.1f ms)", 
 						currentTime, b.scheduledMIDIStop.scheduleTime, float64(timeDiff)/1000.0)
 				}
 				b.scheduledMIDIStop = nil // Clear the scheduled event
@@ -748,16 +838,21 @@ func (b *MIDILinkBridge) midiClockSender() {
 					msg = []byte{0xFA} // Start
 					msgType = "Start"
 					
-					// Transport started - align to current MIDI clock boundary
-					currentBeat := b.state.BeatAtTime(currentTime, midiClockQuantum)
-					nextClockBeat = float64(int(currentBeat/midiClockQuantum)+1) * midiClockQuantum
+					// Get the exact beat at transport start time for phase-coherent alignment
+					startBeat := b.state.BeatAtTime(int64(b.scheduledMIDIStart.scheduleTime), midiClockQuantum)
+					
+					// Align MIDI clock to the nearest clock boundary
+					// This ensures MIDI clock phase matches Link beat phase
+					nextClockBeat = float64(int(startBeat/midiClockQuantum)) * midiClockQuantum
+					
+					b.logInfo("MIDI clock aligned to beat %.3f at transport start", nextClockBeat)
 				}
 				
 				if err := b.midiOut.SendMessage(msg); err != nil {
 					log.Printf("Failed to send scheduled MIDI %s: %v", msgType, err)
 				} else {
 					timeDiff := int64(currentTime) - int64(b.scheduledMIDIStart.scheduleTime)
-					fmt.Printf("MIDI transport sent: %s at time %d (scheduled: %d, diff: %.1f ms)\n", 
+					b.logInfo("MIDI transport sent: %s at time %d (scheduled: %d, diff: %.1f ms)", 
 						msgType, currentTime, b.scheduledMIDIStart.scheduleTime, float64(timeDiff)/1000.0)
 				}
 				
@@ -810,6 +905,182 @@ func playingStateString(isPlaying bool) string {
 	return "stopped"
 }
 
+// setupUI initializes the TUI interface
+func (b *MIDILinkBridge) setupUI() {
+	b.app = tview.NewApplication()
+	
+	// Create stats table
+	b.statsTable = tview.NewTable().SetBorders(true)
+	b.statsTable.SetTitle(" MIDI-Link Bridge Stats ").SetBorder(true)
+	
+	// Create log view
+	b.logView = tview.NewTextView().
+		SetDynamicColors(true).
+		SetChangedFunc(func() {
+			b.app.Draw()
+		})
+	b.logView.SetTitle(" Log Messages ").SetBorder(true)
+	
+	// Create main layout
+	flex := tview.NewFlex().
+		AddItem(b.statsTable, 0, 1, true).
+		AddItem(b.logView, 0, 1, false)
+	
+	b.app.SetRoot(flex, true)
+	
+	// Initialize stats table headers
+	b.updateStatsTable()
+	
+	// Start UI update routine
+	go b.uiUpdateLoop()
+}
+
+// getLogWriter returns a writer that sends logs to the UI
+func (b *MIDILinkBridge) getLogWriter() *uiLogWriter {
+	return &uiLogWriter{bridge: b}
+}
+
+// uiLogWriter implements io.Writer for logrus
+type uiLogWriter struct {
+	bridge *MIDILinkBridge
+}
+
+func (w *uiLogWriter) Write(p []byte) (n int, err error) {
+	if w.bridge.logView != nil {
+		w.bridge.logView.Write(p)
+	}
+	return len(p), nil
+}
+
+// updateStatsTable refreshes the stats display
+func (b *MIDILinkBridge) updateStatsTable() {
+	if !b.uiEnabled || b.statsTable == nil {
+		return
+	}
+	
+	b.mu.RLock()
+	linkTempo := b.lastLinkTempo
+	midiTempo := b.lastMIDITempo
+	clockCount := b.midiClockCount
+	linkPlaying := b.linkIsPlaying
+	midiPlaying := b.midiIsPlaying
+	phaseOffset := b.phaseOffset
+	externalSync := b.externalSyncEnabled
+	b.mu.RUnlock()
+	
+	// Clear and rebuild table
+	b.statsTable.Clear()
+	
+	row := 0
+	b.statsTable.SetCell(row, 0, tview.NewTableCell("Mode:").SetTextColor(tcell.ColorYellow))
+	mode := "Link Master"
+	if externalSync {
+		mode = "MIDI Master"
+	}
+	b.statsTable.SetCell(row, 1, tview.NewTableCell(mode).SetTextColor(tcell.ColorWhite))
+	row++
+	
+	b.statsTable.SetCell(row, 0, tview.NewTableCell("Link Tempo:").SetTextColor(tcell.ColorYellow))
+	b.statsTable.SetCell(row, 1, tview.NewTableCell(fmt.Sprintf("%.1f BPM", linkTempo)).SetTextColor(tcell.ColorGreen))
+	row++
+	
+	if midiTempo > 0 {
+		b.statsTable.SetCell(row, 0, tview.NewTableCell("MIDI Tempo:").SetTextColor(tcell.ColorYellow))
+		b.statsTable.SetCell(row, 1, tview.NewTableCell(fmt.Sprintf("%.1f BPM", midiTempo)).SetTextColor(tcell.ColorGreen))
+		row++
+	}
+	
+	b.statsTable.SetCell(row, 0, tview.NewTableCell("Link Transport:").SetTextColor(tcell.ColorYellow))
+	linkStatus := "Stopped"
+	statusColor := tcell.ColorRed
+	if linkPlaying {
+		linkStatus = "Playing"
+		statusColor = tcell.ColorGreen
+	}
+	b.statsTable.SetCell(row, 1, tview.NewTableCell(linkStatus).SetTextColor(statusColor))
+	row++
+	
+	b.statsTable.SetCell(row, 0, tview.NewTableCell("MIDI Transport:").SetTextColor(tcell.ColorYellow))
+	midiStatus := "Stopped"
+	statusColor = tcell.ColorRed
+	if midiPlaying {
+		midiStatus = "Playing"
+		statusColor = tcell.ColorGreen
+	}
+	b.statsTable.SetCell(row, 1, tview.NewTableCell(midiStatus).SetTextColor(statusColor))
+	row++
+	
+	if clockCount > 0 {
+		b.statsTable.SetCell(row, 0, tview.NewTableCell("MIDI Clocks:").SetTextColor(tcell.ColorYellow))
+		b.statsTable.SetCell(row, 1, tview.NewTableCell(fmt.Sprintf("%d", clockCount)).SetTextColor(tcell.ColorBlue))
+		row++
+	}
+	
+	if phaseOffset != 0 {
+		b.statsTable.SetCell(row, 0, tview.NewTableCell("Phase Offset:").SetTextColor(tcell.ColorYellow))
+		offsetColor := tcell.ColorGreen
+		if abs(float64(phaseOffset.Microseconds())) > 1000 {
+			offsetColor = tcell.ColorRed
+		}
+		b.statsTable.SetCell(row, 1, tview.NewTableCell(fmt.Sprintf("%+.2fms", float64(phaseOffset.Microseconds())/1000.0)).SetTextColor(offsetColor))
+		row++
+	}
+	
+	// Instructions
+	row++
+	b.statsTable.SetCell(row, 0, tview.NewTableCell("Press 'q' to quit").SetTextColor(tcell.ColorDarkGray))
+}
+
+// uiUpdateLoop updates the UI periodically
+func (b *MIDILinkBridge) uiUpdateLoop() {
+	if !b.uiEnabled {
+		return
+	}
+	
+	ticker := time.NewTicker(100 * time.Millisecond)
+	defer ticker.Stop()
+	
+	for {
+		select {
+		case <-b.ctx.Done():
+			return
+		case <-ticker.C:
+			if b.app != nil {
+				b.app.QueueUpdateDraw(func() {
+					b.updateStatsTable()
+				})
+			}
+		}
+	}
+}
+
+// runUI starts the TUI
+func (b *MIDILinkBridge) runUI() error {
+	if !b.uiEnabled {
+		return nil
+	}
+	
+	// Set up key bindings
+	b.app.SetInputCapture(func(event *tcell.EventKey) *tcell.EventKey {
+		if event.Rune() == 'q' || event.Key() == tcell.KeyEscape {
+			b.app.Stop()
+			return nil
+		}
+		return event
+	})
+	
+	return b.app.Run()
+}
+
+// logInfo logs an info message (will go to UI if enabled)
+func (b *MIDILinkBridge) logInfo(msg string, args ...interface{}) {
+	if b.uiEnabled {
+		logrus.Infof(msg, args...)
+	} else {
+		fmt.Printf(msg+"\n", args...)
+	}
+}
+
 func listAvailablePorts() {
 	fmt.Println("Available MIDI Input Ports:")
 	inPorts, err := abletonlink.ListInputPorts()
@@ -841,8 +1112,8 @@ func main() {
 		return
 	}
 
-	// Create bridge with specified initial tempo and sync mode
-	bridge, err := NewMIDILinkBridge(*initialTempo, *enableExternalSync)
+	// Create bridge with specified initial tempo, sync mode, and UI mode
+	bridge, err := NewMIDILinkBridge(*initialTempo, *enableExternalSync, *cuiMode)
 	if err != nil {
 		log.Fatalf("Failed to create bridge: %v", err)
 	}
@@ -852,21 +1123,29 @@ func main() {
 		log.Fatalf("Failed to start bridge: %v", err)
 	}
 	
-	// Wait for interrupt signal
-	c := make(chan os.Signal, 1)
-	signal.Notify(c, os.Interrupt)
-	
-	fmt.Println("MIDI-Link Bridge running... Press Ctrl+C to stop")
-	fmt.Println("\nUsage:")
-	fmt.Println("  -list-ports              List available MIDI ports")
-	fmt.Println("  -midi-in-port <n>        Use physical input port number n")
-	fmt.Println("  -midi-out-port <n>       Use physical output port number n")
-	fmt.Println("  -tempo <bpm>             Set initial tempo (default: 120)")
-	fmt.Println("  -enable-external-sync    MIDI clock/transport controls Link (default: Link controls MIDI)")
-	fmt.Println("")
-	fmt.Println("Without port flags, virtual ports are created for other apps to connect to.")
-	fmt.Println("")
-	<-c
+	if *cuiMode {
+		// Run TUI mode
+		if err := bridge.runUI(); err != nil {
+			log.Fatalf("UI error: %v", err)
+		}
+	} else {
+		// Wait for interrupt signal in CLI mode
+		c := make(chan os.Signal, 1)
+		signal.Notify(c, os.Interrupt)
+		
+		fmt.Println("MIDI-Link Bridge running... Press Ctrl+C to stop")
+		fmt.Println("\nUsage:")
+		fmt.Println("  -list-ports              List available MIDI ports")
+		fmt.Println("  -midi-in-port <n>        Use physical input port number n")
+		fmt.Println("  -midi-out-port <n>       Use physical output port number n")
+		fmt.Println("  -tempo <bpm>             Set initial tempo (default: 120)")
+		fmt.Println("  -enable-external-sync    MIDI clock/transport controls Link (default: Link controls MIDI)")
+		fmt.Println("  -cui                     Enable console UI mode")
+		fmt.Println("")
+		fmt.Println("Without port flags, virtual ports are created for other apps to connect to.")
+		fmt.Println("")
+		<-c
+	}
 	
 	// Graceful shutdown
 	bridge.Stop()
