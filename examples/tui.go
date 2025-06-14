@@ -345,7 +345,8 @@ func (tui *TUIManager) updateBeatPanel() {
 	
 	// Phase progress bar
 	progressWidth := 20
-	progressFilled := int(phase * float64(progressWidth))
+	normalizedPhase := phase / defaultQuantum // Normalize to 0-1 range
+	progressFilled := int(normalizedPhase * float64(progressWidth))
 	progressBar := "\n["
 	for i := 0; i < progressWidth; i++ {
 		if i < progressFilled {
@@ -354,7 +355,7 @@ func (tui *TUIManager) updateBeatPanel() {
 			progressBar += "[darkgray::]░[white::]"
 		}
 	}
-	progressBar += fmt.Sprintf("] %.1f%%", phase*100)
+	progressBar += fmt.Sprintf("] %.1f%%", normalizedPhase*100)
 	beatDisplay += progressBar
 	
 	tui.beatPanel.SetText(beatDisplay)
