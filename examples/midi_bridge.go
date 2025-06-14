@@ -22,7 +22,7 @@ const (
 	
 	// Bridge configuration
 	virtualPortName = "Link-MIDI Bridge"
-	tempoTolerance  = 0.8 // BPM tolerance for tempo changes (stable but responsive)
+	tempoTolerance  = 0.5 // BPM tolerance for tempo changes (responsive to fast changes)
 )
 
 // scheduledTransport represents a MIDI transport event scheduled for a specific time
@@ -296,46 +296,33 @@ func (b *MIDILinkBridge) handleMIDIClock() {
 	
 	b.midiClockCount++
 	
-	// Calculate tempo every 12 clocks (half quarter note) for stability vs responsiveness balance
-	if b.midiClockCount%12 == 0 && !b.lastMIDIClockTime.IsZero() {
+	// Calculate tempo every 6 clocks for better response to rapid changes
+	if b.midiClockCount%6 == 0 && !b.lastMIDIClockTime.IsZero() {
 		duration := now.Sub(b.lastMIDIClockTime)
 		if duration > 0 {
-			// Calculate BPM from 12-clock duration (half quarter note)
-			// 12 clocks = 1/2 quarter note, so multiply by 2 to get quarter note duration
-			quarterNoteDuration := duration.Microseconds() * 2
+			// Calculate BPM from 6-clock duration (quarter quarter note)
+			// 6 clocks = 1/4 quarter note, so multiply by 4 to get quarter note duration
+			quarterNoteDuration := duration.Microseconds() * 4
 			bpm := float64(microsecondsPerMinute) / float64(quarterNoteDuration)
 			
 			// Don't show tempo calculations - only show actual changes
 			
 			// Check if this is reasonable BPM
 			if bpm >= 40 && bpm <= 200 {
-				// Add to tempo history for averaging
-				b.tempoHistory = append(b.tempoHistory, bpm)
-				if len(b.tempoHistory) > b.tempoHistorySize {
-					b.tempoHistory = b.tempoHistory[1:] // Remove oldest
-				}
-				
-				// Calculate averaged tempo for stability
-				var avgTempo float64
-				for _, t := range b.tempoHistory {
-					avgTempo += t
-				}
-				avgTempo /= float64(len(b.tempoHistory))
-				
-				// First tempo reading or significant change
-				if b.lastMIDITempo == 0.0 || abs(avgTempo-b.lastMIDITempo) > tempoTolerance {
+				// For fast tempo changes, use immediate response without averaging
+				if b.lastMIDITempo == 0.0 || abs(bpm-b.lastMIDITempo) > tempoTolerance {
 					oldTempo := b.lastMIDITempo
-					b.lastMIDITempo = avgTempo
+					b.lastMIDITempo = bpm
 					
 					if oldTempo == 0.0 {
-						fmt.Printf("MIDI tempo: %.1f BPM\n", avgTempo)
+						fmt.Printf("MIDI tempo: %.1f BPM\n", bpm)
 					} else {
-						fmt.Printf("MIDI tempo: %.1f BPM (was %.1f)\n", avgTempo, oldTempo)
+						fmt.Printf("MIDI tempo: %.1f BPM (was %.1f)\n", bpm, oldTempo)
 					}
 					
 					// Update Link tempo if external sync is enabled
 					if b.externalSyncEnabled {
-						go b.updateLinkTempo(avgTempo)
+						go b.updateLinkTempo(bpm)
 					}
 				}
 			}
