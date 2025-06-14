@@ -98,6 +98,14 @@ func (in *MidiIn) SetCallback(callback func([]byte)) {
 	C.rtmidi_in_set_callback(in.ptr, (*[0]byte)(C.rtmidi_callback), unsafe.Pointer(in.id))
 }
 
+// IgnoreTypes configures which MIDI message types to ignore
+// midiSysex: ignore system exclusive messages
+// midiTime: ignore MIDI time messages (including clock)
+// midiSense: ignore active sensing messages
+func (in *MidiIn) IgnoreTypes(midiSysex, midiTime, midiSense bool) {
+	C.rtmidi_in_ignore_types(in.ptr, C.bool(midiSysex), C.bool(midiTime), C.bool(midiSense))
+}
+
 // OpenPort opens a physical MIDI input port by number
 func (in *MidiIn) OpenPort(portNumber uint, portName string) error {
 	cname := C.CString(portName)
