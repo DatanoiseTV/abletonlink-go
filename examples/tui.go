@@ -464,16 +464,36 @@ type TUILogWriter struct {
 }
 
 func (w *TUILogWriter) Write(p []byte) (n int, err error) {
-	// Format log message with timestamp
-	timestamp := time.Now().Format("15:04:05")
-	message := fmt.Sprintf("[darkgray]%s[white] %s", timestamp, string(p))
+	// Parse structured log message and clean it up
+	logLine := strings.TrimSpace(string(p))
 	
-	// Remove trailing newline to avoid double spacing
-	message = strings.TrimRight(message, "\n")
-	
-	if w.tui.logPanel != nil {
-		fmt.Fprintln(w.tui.logPanel, message)
+	// Extract just the message part from logrus format
+	if strings.Contains(logLine, "msg=") {
+		// Find the msg= part and extract just the message
+		parts := strings.Split(logLine, "msg=")
+		if len(parts) > 1 {
+			msg := parts[1]
+			// Remove quotes if present
+			msg = strings.Trim(msg, "\"")
+			
+			// Create clean message with just timestamp and content
+			timestamp := time.Now().Format("15:04:05")
+			message := fmt.Sprintf("[darkgray]%s[white] %s", timestamp, msg)
+			
+			if w.tui.logPanel != nil {
+				fmt.Fprintln(w.tui.logPanel, message)
+			}
+		}
+	} else {
+		// Fallback for non-structured logs
+		timestamp := time.Now().Format("15:04:05")
+		message := fmt.Sprintf("[darkgray]%s[white] %s", timestamp, logLine)
+		
+		if w.tui.logPanel != nil {
+			fmt.Fprintln(w.tui.logPanel, message)
+		}
 	}
+	
 	return len(p), nil
 }
 
