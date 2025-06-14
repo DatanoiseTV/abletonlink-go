@@ -210,10 +210,28 @@ Do not mix audio and application thread methods concurrently.
 
 Complete examples are available in the `examples/` directory:
 
+### Basic Usage
 ```bash
 cd examples
 go run basic_link.go
 ```
+
+### MIDI-Link Bridge
+A comprehensive example that creates a bidirectional bridge between MIDI clock and Ableton Link:
+
+```bash
+cd examples
+go run midi_bridge.go
+```
+
+Features:
+- Creates virtual MIDI ports ("Link-MIDI Bridge In/Out")
+- Bidirectional tempo synchronization (MIDI ↔ Link)
+- Transport sync (start/stop/continue) with bar quantization
+- Real-time MIDI clock generation based on Link tempo
+- Compatible with DAWs, hardware sequencers, and MIDI applications
+
+See `examples/README.md` for detailed usage instructions.
 
 ## Building from Source
 

@@ -34,14 +34,23 @@ import (
 	"unsafe"
 )
 
+// Global storage for Go callbacks to avoid CGO pointer issues
+var (
+	linkRegistry = make(map[uintptr]*Link)
+	linkRegistryMu sync.RWMutex
+	nextLinkID uintptr = 1
+)
+
 // Link represents an Ableton Link instance
 type Link struct {
 	impl C.abl_link
 	mu   sync.Mutex
+	id   uintptr  // C-safe identifier
 
 	numPeersCallback  func(uint64)
 	tempoCallback     func(float64)
 	startStopCallback func(bool)
+	captureStateMu   sync.Mutex  // For non-thread-safe CaptureAppSessionState/CommitAppSessionState
 }
 
 // SessionState represents the current session state
@@ -51,14 +60,31 @@ type SessionState struct {
 
 // NewLink creates a new Link instance with the given initial tempo in BPM
 func NewLink(bpm float64) *Link {
+	linkRegistryMu.Lock()
+	id := nextLinkID
+	nextLinkID++
+	linkRegistryMu.Unlock()
+	
 	link := &Link{
 		impl: C.abl_link_create(C.double(bpm)),
+		id:   id,
 	}
+	
+	// Register the link instance
+	linkRegistryMu.Lock()
+	linkRegistry[id] = link
+	linkRegistryMu.Unlock()
+	
 	return link
 }
 
 // Destroy cleans up the Link instance
 func (l *Link) Destroy() {
+	// Unregister the link instance
+	linkRegistryMu.Lock()
+	delete(linkRegistry, l.id)
+	linkRegistryMu.Unlock()
+	
 	C.abl_link_destroy(l.impl)
 }
 
@@ -99,7 +125,7 @@ func (l *Link) SetNumPeersCallback(callback func(uint64)) {
 	
 	l.numPeersCallback = callback
 	if callback != nil {
-		C.abl_link_set_num_peers_callback(l.impl, (*[0]byte)(C.c_num_peers_callback), unsafe.Pointer(l))
+		C.abl_link_set_num_peers_callback(l.impl, (*[0]byte)(C.c_num_peers_callback), unsafe.Pointer(l.id))
 	} else {
 		C.abl_link_set_num_peers_callback(l.impl, nil, nil)
 	}
@@ -112,7 +138,7 @@ func (l *Link) SetTempoCallback(callback func(float64)) {
 	
 	l.tempoCallback = callback
 	if callback != nil {
-		C.abl_link_set_tempo_callback(l.impl, (*[0]byte)(C.c_tempo_callback), unsafe.Pointer(l))
+		C.abl_link_set_tempo_callback(l.impl, (*[0]byte)(C.c_tempo_callback), unsafe.Pointer(l.id))
 	} else {
 		C.abl_link_set_tempo_callback(l.impl, nil, nil)
 	}
@@ -125,7 +151,7 @@ func (l *Link) SetStartStopCallback(callback func(bool)) {
 	
 	l.startStopCallback = callback
 	if callback != nil {
-		C.abl_link_set_start_stop_callback(l.impl, (*[0]byte)(C.c_start_stop_callback), unsafe.Pointer(l))
+		C.abl_link_set_start_stop_callback(l.impl, (*[0]byte)(C.c_start_stop_callback), unsafe.Pointer(l.id))
 	} else {
 		C.abl_link_set_start_stop_callback(l.impl, nil, nil)
 	}
@@ -155,11 +181,15 @@ func (l *Link) CommitAudioSessionState(state *SessionState) {
 
 // CaptureAppSessionState captures the current session state for application thread use
 func (l *Link) CaptureAppSessionState(state *SessionState) {
+	l.captureStateMu.Lock()
+	defer l.captureStateMu.Unlock()
 	C.abl_link_capture_app_session_state(l.impl, state.impl)
 }
 
 // CommitAppSessionState commits session state changes from application thread
 func (l *Link) CommitAppSessionState(state *SessionState) {
+	l.captureStateMu.Lock()
+	defer l.captureStateMu.Unlock()
 	C.abl_link_commit_app_session_state(l.impl, state.impl)
 }
 
