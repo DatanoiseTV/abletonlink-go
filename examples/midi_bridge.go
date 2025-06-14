@@ -22,7 +22,7 @@ const (
 	
 	// Bridge configuration
 	virtualPortName = "Link-MIDI Bridge"
-	tempoTolerance  = 0.5 // BPM tolerance for tempo changes (responsive to fast changes)
+	tempoTolerance  = 0.1 // BPM tolerance for tempo changes (responsive to fast changes)
 )
 
 // scheduledTransport represents a MIDI transport event scheduled for a specific time
@@ -74,6 +74,11 @@ type MIDILinkBridge struct {
 	tempoHistory           []float64 // Recent tempo readings for averaging
 	tempoHistorySize       int       // Max history size
 	
+	// Phase adjustment for jitter compensation
+	clockTimings           []time.Time // Recent clock arrival times
+	expectedClockInterval  time.Duration // Expected time between clocks
+	phaseOffset            time.Duration // Accumulated phase correction
+	
 	// Feedback prevention
 	lastMIDITransportSource string // Track source of last transport change
 	
@@ -101,6 +106,7 @@ func NewMIDILinkBridge(initialTempo float64, externalSync bool) (*MIDILinkBridge
 		externalSyncEnabled: externalSync,
 		tempoHistory:        make([]float64, 0, 4), // Keep last 4 readings
 		tempoHistorySize:    4,
+		clockTimings:        make([]time.Time, 0, 8), // Keep last 8 clock timings
 		ctx:                 ctx,
 		cancel:              cancel,
 	}
@@ -296,6 +302,12 @@ func (b *MIDILinkBridge) handleMIDIClock() {
 	
 	b.midiClockCount++
 	
+	// Track clock arrival times for jitter analysis
+	b.clockTimings = append(b.clockTimings, now)
+	if len(b.clockTimings) > 8 {
+		b.clockTimings = b.clockTimings[1:] // Keep last 8 timings
+	}
+	
 	// Calculate tempo every 6 clocks for better response to rapid changes
 	if b.midiClockCount%6 == 0 && !b.lastMIDIClockTime.IsZero() {
 		duration := now.Sub(b.lastMIDIClockTime)
@@ -320,9 +332,9 @@ func (b *MIDILinkBridge) handleMIDIClock() {
 						fmt.Printf("MIDI tempo: %.1f BPM (was %.1f)\n", bpm, oldTempo)
 					}
 					
-					// Update Link tempo if external sync is enabled
+					// Update Link tempo with phase adjustment if external sync is enabled
 					if b.externalSyncEnabled {
-						go b.updateLinkTempo(bpm)
+						go b.updateLinkTempoWithPhaseAdjustment(bpm, now)
 					}
 				}
 			}
@@ -394,6 +406,94 @@ func (b *MIDILinkBridge) updateLinkTempo(bpm float64) {
 	
 	b.link.CommitAppSessionState(b.state)
 	// Don't log - tempo change already logged above
+}
+
+// updateLinkTempoWithPhaseAdjustment synchronizes tempo with jitter compensation
+func (b *MIDILinkBridge) updateLinkTempoWithPhaseAdjustment(bpm float64, clockTime time.Time) {
+	b.link.CaptureAppSessionState(b.state)
+	currentTime := b.link.ClockMicros()
+	
+	// Calculate expected clock interval from BPM
+	expectedInterval := time.Duration(float64(time.Minute) / (bpm * midiClocksPerQuarterNote))
+	b.expectedClockInterval = expectedInterval
+	
+	// Analyze jitter and calculate phase correction
+	phaseCorrection := b.calculatePhaseCorrection(clockTime)
+	
+	// Apply phase correction to the Link timeline
+	adjustedTime := uint64(currentTime) + uint64(phaseCorrection.Microseconds())
+	
+	currentBeat := b.state.BeatAtTime(currentTime, defaultQuantum)
+	b.state.SetTempo(bpm, currentTime)
+	
+	// Use phase-adjusted time for more accurate beat alignment
+	b.state.ForceBeatAtTime(currentBeat, adjustedTime, defaultQuantum)
+	
+	b.link.CommitAppSessionState(b.state)
+	
+	// Log phase adjustments (show all non-zero adjustments)
+	if phaseCorrection != 0 {
+		fmt.Printf("Phase adjustment: %+.2fms (jitter compensation)\n", float64(phaseCorrection.Microseconds())/1000.0)
+	}
+}
+
+// calculatePhaseCorrection analyzes clock jitter and returns a correction
+func (b *MIDILinkBridge) calculatePhaseCorrection(currentClock time.Time) time.Duration {
+	if len(b.clockTimings) < 4 || b.expectedClockInterval == 0 {
+		return 0 // Not enough data
+	}
+	
+	// Calculate average jitter from recent clock intervals
+	var totalJitter time.Duration
+	var jitterCount int
+	
+	for i := 1; i < len(b.clockTimings); i++ {
+		actualInterval := b.clockTimings[i].Sub(b.clockTimings[i-1])
+		jitter := actualInterval - b.expectedClockInterval
+		totalJitter += jitter
+		jitterCount++
+	}
+	
+	if jitterCount == 0 {
+		return 0
+	}
+	
+	avgJitter := totalJitter / time.Duration(jitterCount)
+	
+	// Log jitter analysis when it's significant
+	if abs(float64(avgJitter.Microseconds())) > 500 { // > 0.5ms
+		fmt.Printf("Clock jitter detected: %+.2fms avg over %d intervals\n", 
+			float64(avgJitter.Microseconds())/1000.0, jitterCount)
+	}
+	
+	// Apply gentle phase correction (max 2ms adjustment)
+	maxCorrection := 2 * time.Millisecond
+	originalJitter := avgJitter
+	if avgJitter > maxCorrection {
+		avgJitter = maxCorrection
+	} else if avgJitter < -maxCorrection {
+		avgJitter = -maxCorrection
+	}
+	
+	// Log when we're clamping the correction
+	if avgJitter != originalJitter {
+		fmt.Printf("Phase correction clamped: %+.2fms -> %+.2fms\n", 
+			float64(originalJitter.Microseconds())/1000.0,
+			float64(avgJitter.Microseconds())/1000.0)
+	}
+	
+	// Accumulate phase offset with decay
+	oldOffset := b.phaseOffset
+	b.phaseOffset = (b.phaseOffset*3 + avgJitter) / 4 // 75% decay
+	
+	// Log phase offset changes
+	if abs(float64(b.phaseOffset.Microseconds()-oldOffset.Microseconds())) > 100 { // > 0.1ms change
+		fmt.Printf("Phase offset updated: %+.2fms -> %+.2fms\n", 
+			float64(oldOffset.Microseconds())/1000.0,
+			float64(b.phaseOffset.Microseconds())/1000.0)
+	}
+	
+	return b.phaseOffset
 }
 
 // syncMIDITransportToLink synchronizes MIDI transport to Link (external sync mode)
