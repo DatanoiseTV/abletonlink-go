@@ -300,7 +300,7 @@ func (tui *TUIManager) updateBeatPanel() {
 	
 	// Get current musical position
 	currentBeat := tui.bridge.state.BeatAtTime(currentTime, defaultQuantum)
-	phase := tui.bridge.state.PhaseAtTime(currentTime, 1.0) // Use 1.0 quantum for single beat phase
+	phase := tui.bridge.state.PhaseAtTime(currentTime, defaultQuantum) // Use 4.0 quantum for slower progress
 	
 	// Calculate bar and beat within bar
 	beatsPerBar := float64(tui.bridge.beatsPerBar)
