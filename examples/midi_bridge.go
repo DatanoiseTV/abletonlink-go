@@ -1025,6 +1025,33 @@ func (b *MIDILinkBridge) resetManualPhaseOffset() {
 	}
 }
 
+// adjustTempo adjusts the Link tempo
+func (b *MIDILinkBridge) adjustTempo(delta float64) {
+	b.link.CaptureAppSessionState(b.state)
+	oldTempo := b.state.Tempo()
+	newTempo := oldTempo + delta
+	
+	// Clamp to reasonable range (40-450 BPM)
+	if newTempo > 450.0 {
+		newTempo = 450.0
+	} else if newTempo < 40.0 {
+		newTempo = 40.0
+	}
+	
+	// Only update if the tempo actually changed
+	if newTempo != oldTempo {
+		currentTime := b.link.ClockMicros()
+		b.state.SetTempo(newTempo, currentTime)
+		b.link.CommitAppSessionState(b.state)
+		
+		b.mu.Lock()
+		b.lastLinkTempo = newTempo
+		b.mu.Unlock()
+		
+		b.logInfo("Tempo adjusted: %.1f BPM -> %.1f BPM", oldTempo, newTempo)
+	}
+}
+
 // toggleStartStopSync toggles Link start/stop synchronization
 func (b *MIDILinkBridge) toggleStartStopSync() {
 	b.mu.Lock()

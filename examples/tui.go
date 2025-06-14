@@ -97,12 +97,13 @@ func (tui *TUIManager) setupComponents() {
 	tui.footerBar = tview.NewTextView().
 		SetTextAlign(tview.AlignCenter).
 		SetDynamicColors(true).
-		SetText("[black:white] ↑/↓ Phase [black:white] Space [black:white] Transport [black:white] S [black:white] Sync [black:white] H [black:white] Help [black:white] Q [black:white] Quit ")
+		SetText("[black:white] ↑/↓ BPM [black:white] +/- Phase [black:white] Space Transport [black:white] S Sync [black:white] H Help [black:white] Q Quit ")
 	
 	// Help modal
 	tui.helpModal = tview.NewModal().
 		SetText("MIDI-Link Bridge Controls\n\n" +
-			"↑/↓ or +/-: Adjust phase offset (±0.5ms)\n" +
+			"↑/↓: Adjust BPM (±1.0)\n" +
+			"+/-: Adjust phase offset (±0.5ms)\n" +
 			"Space: Toggle transport start/stop\n" +
 			"S: Toggle Link start/stop sync\n" +
 			"R: Reset manual phase offset\n" +
@@ -180,11 +181,19 @@ func (tui *TUIManager) setupKeyBindings() {
 			}
 			return nil
 			
-		case event.Key() == tcell.KeyUp || event.Rune() == '+' || event.Rune() == '=':
+		case event.Key() == tcell.KeyUp:
+			tui.bridge.adjustTempo(1.0)
+			return nil
+			
+		case event.Key() == tcell.KeyDown:
+			tui.bridge.adjustTempo(-1.0)
+			return nil
+			
+		case event.Rune() == '+' || event.Rune() == '=':
 			tui.bridge.adjustManualPhaseOffset(500 * time.Microsecond)
 			return nil
 			
-		case event.Key() == tcell.KeyDown || event.Rune() == '-':
+		case event.Rune() == '-':
 			tui.bridge.adjustManualPhaseOffset(-500 * time.Microsecond)
 			return nil
 			
@@ -355,7 +364,7 @@ func (tui *TUIManager) updateBeatPanel() {
 			progressBar += "[darkgray::]░[white::]"
 		}
 	}
-	progressBar += fmt.Sprintf("] %.1f%%", normalizedPhase*100)
+	progressBar += fmt.Sprintf("] %6.1f%%", normalizedPhase*100)
 	beatDisplay += progressBar
 	
 	tui.beatPanel.SetText(beatDisplay)
