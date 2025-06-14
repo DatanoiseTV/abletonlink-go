@@ -1,6 +1,6 @@
 # Ableton Link Go Bindings
 
-Professional Go bindings for [Ableton Link](https://github.com/Ableton/link), a technology that synchronizes musical tempo and timing across multiple applications running on one or more devices.
+Go bindings for [Ableton Link](https://github.com/Ableton/link), a technology that synchronizes musical tempo and timing across multiple applications running on one or more devices.
 
 ## Features
 
@@ -245,8 +245,6 @@ make install      # Full build and install
 ## License
 
 This project follows the same licensing terms as Ableton Link (GPL v2+).
-
-For proprietary software integration, contact [link-devs@ableton.com](mailto:link-devs@ableton.com).
 
 ## Contributing
 
