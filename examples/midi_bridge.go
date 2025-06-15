@@ -14,8 +14,6 @@ import (
 	"time"
 
 	"github.com/DatanoiseTV/abletonlink-go"
-	"github.com/gdamore/tcell/v2"
-	"github.com/rivo/tview"
 	"github.com/sirupsen/logrus"
 )
 
@@ -90,11 +88,8 @@ type MIDILinkBridge struct {
 	lastMIDITransportSource string // Track source of last transport change
 	
 	// TUI components
-	app        *tview.Application
-	statsTable *tview.Table
-	logView    *tview.TextView
-	beatView   *tview.TextView
-	uiEnabled  bool
+	tui       *TUIManager
+	uiEnabled bool
 	
 	// Context for shutdown
 	ctx    context.Context
@@ -185,10 +180,11 @@ func NewMIDILinkBridge(initialTempo float64, externalSync bool, enableUI bool) (
 		log.Printf("Loaded manual phase offset: %+.2fms", float64(config.ManualPhaseOffset.Microseconds())/1000.0)
 	}
 	
-	// Setup logging
+	// Setup UI if enabled
 	if enableUI {
-		// In UI mode, disable standard output logging
-		logrus.SetOutput(bridge.getLogWriter())
+		bridge.tui = NewTUIManager(bridge)
+		// In UI mode, redirect logs to TUI
+		logrus.SetOutput(bridge.tui.GetLogWriter())
 		logrus.SetLevel(logrus.InfoLevel)
 	} else {
 		logrus.SetLevel(logrus.WarnLevel) // Reduce noise in CLI mode
@@ -196,11 +192,6 @@ func NewMIDILinkBridge(initialTempo float64, externalSync bool, enableUI bool) (
 	
 	// Set up Link callbacks
 	bridge.setupLinkCallbacks()
-	
-	// Setup UI if enabled
-	if enableUI {
-		bridge.setupUI()
-	}
 	
 	return bridge, nil
 }
@@ -987,307 +978,14 @@ func playingStateString(isPlaying bool) string {
 	return "stopped"
 }
 
-// setupUI initializes the TUI interface
-func (b *MIDILinkBridge) setupUI() {
-	b.app = tview.NewApplication()
-	
-	// Create stats table
-	b.statsTable = tview.NewTable().SetBorders(true)
-	b.statsTable.SetTitle(" MIDI-Link Bridge Stats ").SetBorder(true)
-	
-	// Create log view
-	b.logView = tview.NewTextView().
-		SetDynamicColors(true).
-		SetScrollable(true).
-		SetChangedFunc(func() {
-			b.logView.ScrollToEnd()
-			b.app.Draw()
-		})
-	b.logView.SetTitle(" Log Messages ").SetBorder(true)
-	
-	// Create beat visualization view
-	b.beatView = tview.NewTextView().
-		SetDynamicColors(true).
-		SetTextAlign(tview.AlignCenter)
-	b.beatView.SetTitle(" Beat Visualization ").SetBorder(true)
-	
-	// Create main layout with three panels
-	leftPanel := tview.NewFlex().SetDirection(tview.FlexRow).
-		AddItem(b.statsTable, 0, 2, true).
-		AddItem(b.beatView, 8, 0, false)
-	
-	flex := tview.NewFlex().
-		AddItem(leftPanel, 0, 1, true).
-		AddItem(b.logView, 0, 1, false)
-	
-	b.app.SetRoot(flex, true)
-	
-	// Initialize stats table headers
-	b.updateStatsTable()
-	
-	// Start UI update routine
-	go b.uiUpdateLoop()
-}
+// Legacy UI code removed - now using TUIManager
 
-// getLogWriter returns a writer that sends logs to the UI
-func (b *MIDILinkBridge) getLogWriter() *uiLogWriter {
-	return &uiLogWriter{bridge: b}
-}
+// Legacy log writer removed - now using TUIManager
 
-// uiLogWriter implements io.Writer for logrus
-type uiLogWriter struct {
-	bridge *MIDILinkBridge
-}
+// Legacy UI methods removed - functionality moved to TUIManager
 
-func (w *uiLogWriter) Write(p []byte) (n int, err error) {
-	if w.bridge.logView != nil {
-		w.bridge.logView.Write(p)
-	}
-	return len(p), nil
-}
-
-// updateBeatVisualization creates a visual representation of beat and phase
-func (b *MIDILinkBridge) updateBeatVisualization() {
-	if !b.uiEnabled || b.beatView == nil {
-		return
-	}
-	
-	b.link.CaptureAppSessionState(b.state)
-	currentTime := b.link.ClockMicros()
-	
-	// Get current musical position
-	currentBeat := b.state.BeatAtTime(currentTime, defaultQuantum)
-	phase := b.state.PhaseAtTime(currentTime, defaultQuantum)
-	
-	// Calculate bar and beat within bar
-	beatsPerBar := float64(b.beatsPerBar)
-	bar := int(currentBeat / beatsPerBar)
-	beatInBar := currentBeat - float64(bar)*beatsPerBar
-	
-	// Create visual beat indicator (4 beats per bar)
-	beatIndicator := ""
-	for i := 0; i < b.beatsPerBar; i++ {
-		if i == int(beatInBar) {
-			if b.linkIsPlaying {
-				// Animated beat indicator based on phase
-				if phase < 0.5 {
-					beatIndicator += "[red]●[white] "
-				} else {
-					beatIndicator += "[yellow]◐[white] "
-				}
-			} else {
-				beatIndicator += "[gray]●[white] "
-			}
-		} else {
-			beatIndicator += "[darkgray]○[white] "
-		}
-	}
-	
-	// Phase visualization (0.0 to 1.0 as a progress bar)
-	progressWidth := 20
-	progressFilled := int(phase * float64(progressWidth))
-	progressBar := "["
-	for i := 0; i < progressWidth; i++ {
-		if i < progressFilled {
-			progressBar += "[green]█[white]"
-		} else {
-			progressBar += "[darkgray]░[white]"
-		}
-	}
-	progressBar += "]"
-	
-	// Format the display
-	displayText := fmt.Sprintf(`[yellow]Bar %d[white]
-
-%s
-
-[cyan]Beat:[white] %.2f
-[cyan]Phase:[white] %.3f
-
-%s
-[cyan]%.1f%%[white]`,
-		bar+1, // Display 1-based bar numbers
-		beatIndicator,
-		beatInBar+1, // Display 1-based beat numbers
-		phase,
-		progressBar,
-		phase*100)
-	
-	b.beatView.SetText(displayText)
-}
-
-// updateStatsTable refreshes the stats display
-func (b *MIDILinkBridge) updateStatsTable() {
-	if !b.uiEnabled || b.statsTable == nil {
-		return
-	}
-	
-	b.mu.RLock()
-	linkTempo := b.lastLinkTempo
-	midiTempo := b.lastMIDITempo
-	clockCount := b.midiClockCount
-	linkPlaying := b.linkIsPlaying
-	midiPlaying := b.midiIsPlaying
-	phaseOffset := b.phaseOffset
-	externalSync := b.externalSyncEnabled
-	b.mu.RUnlock()
-	
-	// Clear and rebuild table
-	b.statsTable.Clear()
-	
-	row := 0
-	b.statsTable.SetCell(row, 0, tview.NewTableCell("Mode:").SetTextColor(tcell.ColorYellow))
-	mode := "Link Master"
-	if externalSync {
-		mode = "MIDI Master"
-	}
-	b.statsTable.SetCell(row, 1, tview.NewTableCell(mode).SetTextColor(tcell.ColorWhite))
-	row++
-	
-	b.statsTable.SetCell(row, 0, tview.NewTableCell("Start/Stop Sync:").SetTextColor(tcell.ColorYellow))
-	syncStatus := "Disabled"
-	syncColor := tcell.ColorRed
-	if b.startStopSyncEnabled {
-		syncStatus = "Enabled"
-		syncColor = tcell.ColorGreen
-	}
-	b.statsTable.SetCell(row, 1, tview.NewTableCell(syncStatus).SetTextColor(syncColor))
-	row++
-	
-	b.statsTable.SetCell(row, 0, tview.NewTableCell("Link Tempo:").SetTextColor(tcell.ColorYellow))
-	b.statsTable.SetCell(row, 1, tview.NewTableCell(fmt.Sprintf("%.1f BPM", linkTempo)).SetTextColor(tcell.ColorGreen))
-	row++
-	
-	if midiTempo > 0 {
-		b.statsTable.SetCell(row, 0, tview.NewTableCell("MIDI Tempo:").SetTextColor(tcell.ColorYellow))
-		b.statsTable.SetCell(row, 1, tview.NewTableCell(fmt.Sprintf("%.1f BPM", midiTempo)).SetTextColor(tcell.ColorGreen))
-		row++
-	}
-	
-	b.statsTable.SetCell(row, 0, tview.NewTableCell("Link Transport:").SetTextColor(tcell.ColorYellow))
-	linkStatus := "Stopped"
-	statusColor := tcell.ColorRed
-	if linkPlaying {
-		linkStatus = "Playing"
-		statusColor = tcell.ColorGreen
-	}
-	b.statsTable.SetCell(row, 1, tview.NewTableCell(linkStatus).SetTextColor(statusColor))
-	row++
-	
-	b.statsTable.SetCell(row, 0, tview.NewTableCell("MIDI Transport:").SetTextColor(tcell.ColorYellow))
-	midiStatus := "Stopped"
-	statusColor = tcell.ColorRed
-	if midiPlaying {
-		midiStatus = "Playing"
-		statusColor = tcell.ColorGreen
-	}
-	b.statsTable.SetCell(row, 1, tview.NewTableCell(midiStatus).SetTextColor(statusColor))
-	row++
-	
-	if clockCount > 0 {
-		b.statsTable.SetCell(row, 0, tview.NewTableCell("MIDI Clocks:").SetTextColor(tcell.ColorYellow))
-		b.statsTable.SetCell(row, 1, tview.NewTableCell(fmt.Sprintf("%d", clockCount)).SetTextColor(tcell.ColorBlue))
-		row++
-	}
-	
-	if phaseOffset != 0 {
-		b.statsTable.SetCell(row, 0, tview.NewTableCell("Auto Phase:").SetTextColor(tcell.ColorYellow))
-		offsetColor := tcell.ColorGreen
-		if abs(float64(phaseOffset.Microseconds())) > 1000 {
-			offsetColor = tcell.ColorRed
-		}
-		b.statsTable.SetCell(row, 1, tview.NewTableCell(fmt.Sprintf("%+.2fms", float64(phaseOffset.Microseconds())/1000.0)).SetTextColor(offsetColor))
-		row++
-	}
-	
-	manualOffset := b.manualPhaseOffset
-	if manualOffset != 0 {
-		b.statsTable.SetCell(row, 0, tview.NewTableCell("Manual Phase:").SetTextColor(tcell.ColorYellow))
-		b.statsTable.SetCell(row, 1, tview.NewTableCell(fmt.Sprintf("%+.2fms", float64(manualOffset.Microseconds())/1000.0)).SetTextColor(tcell.ColorBlue))
-		row++
-	}
-	
-	// Show total phase offset if both auto and manual are present
-	if phaseOffset != 0 && manualOffset != 0 {
-		totalOffset := phaseOffset + manualOffset
-		b.statsTable.SetCell(row, 0, tview.NewTableCell("Total Phase:").SetTextColor(tcell.ColorYellow))
-		totalColor := tcell.ColorGreen
-		if abs(float64(totalOffset.Microseconds())) > 1000 {
-			totalColor = tcell.ColorRed
-		}
-		b.statsTable.SetCell(row, 1, tview.NewTableCell(fmt.Sprintf("%+.2fms", float64(totalOffset.Microseconds())/1000.0)).SetTextColor(totalColor))
-		row++
-	}
-	
-	// Instructions
-	row++
-	b.statsTable.SetCell(row, 0, tview.NewTableCell("Keys: +/- phase, r reset, space start/stop, s sync, q quit").SetTextColor(tcell.ColorDarkGray))
-	
-	// Update beat visualization
-	b.updateBeatVisualization()
-}
-
-// uiUpdateLoop updates the UI periodically
-func (b *MIDILinkBridge) uiUpdateLoop() {
-	if !b.uiEnabled {
-		return
-	}
-	
-	ticker := time.NewTicker(100 * time.Millisecond)
-	defer ticker.Stop()
-	
-	for {
-		select {
-		case <-b.ctx.Done():
-			return
-		case <-ticker.C:
-			if b.app != nil {
-				b.app.QueueUpdateDraw(func() {
-					b.updateStatsTable()
-				})
-			}
-		}
-	}
-}
-
-// runUI starts the TUI
-func (b *MIDILinkBridge) runUI() error {
-	if !b.uiEnabled {
-		return nil
-	}
-	
-	// Set up key bindings
-	b.app.SetInputCapture(func(event *tcell.EventKey) *tcell.EventKey {
-		switch {
-		case event.Rune() == 'q' || event.Key() == tcell.KeyEscape:
-			b.app.Stop()
-			return nil
-		case event.Rune() == '+' || event.Rune() == '=':
-			// Increase phase offset by 0.5ms
-			b.adjustManualPhaseOffset(500 * time.Microsecond)
-			return nil
-		case event.Rune() == '-':
-			// Decrease phase offset by 0.5ms
-			b.adjustManualPhaseOffset(-500 * time.Microsecond)
-			return nil
-		case event.Rune() == 'r' || event.Rune() == 'R':
-			// Reset manual phase offset
-			b.resetManualPhaseOffset()
-			return nil
-		case event.Rune() == ' ':
-			// Toggle transport start/stop
-			b.toggleTransport()
-			return nil
-		case event.Rune() == 's' || event.Rune() == 'S':
-			// Toggle Link start/stop sync
-			b.toggleStartStopSync()
-			return nil
-		}
-		return event
-	})
-	
-	return b.app.Run()
-}
+// Legacy updateStatsTable method removed
+// Legacy UI methods removed - functionality moved to TUIManager
 
 // adjustManualPhaseOffset adjusts the manual phase offset
 func (b *MIDILinkBridge) adjustManualPhaseOffset(delta time.Duration) {
@@ -1324,6 +1022,33 @@ func (b *MIDILinkBridge) resetManualPhaseOffset() {
 			float64(oldOffset.Microseconds())/1000.0)
 		// Save config when phase offset is reset
 		b.saveConfig()
+	}
+}
+
+// adjustTempo adjusts the Link tempo
+func (b *MIDILinkBridge) adjustTempo(delta float64) {
+	b.link.CaptureAppSessionState(b.state)
+	oldTempo := b.state.Tempo()
+	newTempo := oldTempo + delta
+	
+	// Clamp to reasonable range (40-450 BPM)
+	if newTempo > 450.0 {
+		newTempo = 450.0
+	} else if newTempo < 40.0 {
+		newTempo = 40.0
+	}
+	
+	// Only update if the tempo actually changed
+	if newTempo != oldTempo {
+		currentTime := b.link.ClockMicros()
+		b.state.SetTempo(newTempo, currentTime)
+		b.link.CommitAppSessionState(b.state)
+		
+		b.mu.Lock()
+		b.lastLinkTempo = newTempo
+		b.mu.Unlock()
+		
+		b.logInfo("Tempo adjusted: %.1f BPM -> %.1f BPM", oldTempo, newTempo)
 	}
 }
 
@@ -1443,8 +1168,8 @@ func main() {
 	}
 	
 	if *cuiMode {
-		// Run TUI mode
-		if err := bridge.runUI(); err != nil {
+		// Run new TUI mode
+		if err := bridge.tui.Run(); err != nil {
 			log.Fatalf("UI error: %v", err)
 		}
 	} else {
