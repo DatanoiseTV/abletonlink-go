@@ -2,6 +2,12 @@
 
 Go bindings for [Ableton Link](https://github.com/Ableton/link), a technology that synchronizes musical tempo and timing across multiple applications running on one or more devices.
 
+## Screenshots
+
+### Ableton Link to MIDI-Bridge (bi-directional) TUI (Text UI)
+
+<img width="983" alt="abletonlin-go console application demo" src="https://github.com/user-attachments/assets/dbb5e7ad-7f44-4960-a6a6-91b8a3d21e6a" />
+
 ## Features
 
 - Complete Go API coverage of Ableton Link functionality
