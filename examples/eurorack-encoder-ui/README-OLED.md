@@ -32,8 +32,12 @@ An enhanced version of the Eurorack-Link Bridge featuring a 128x64 OLED display 
 - GPIO 6: Enter button
 - GPIO 13: Custom clock output
 
-**Original Bridge Pins:**
-- All original GPIO assignments remain the same
+**Original Bridge Pins (updated for I2C compatibility):**
+- GPIO 7: External clock input (moved from GPIO 2)
+- GPIO 8: Start trigger input (moved from GPIO 3)
+- GPIO 4: Stop trigger input
+- GPIO 17: Reset trigger input
+- GPIO 18-24: Clock and transport outputs (unchanged)
 
 ### Wiring Diagram
 

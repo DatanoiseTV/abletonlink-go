@@ -51,9 +51,9 @@ type GPIOPins struct {
 
 // Default GPIO configuration for Raspberry Pi
 var defaultPins = GPIOPins{
-	// Inputs
-	ClockIn:    2,  // GPIO 2 (SDA)
-	StartIn:    3,  // GPIO 3 (SCL)
+	// Inputs - moved away from I2C pins (GPIO 2/3)
+	ClockIn:    7,  // GPIO 7 (SPI0_CE1_N) - moved from GPIO 2
+	StartIn:    8,  // GPIO 8 (SPI0_CE0_N) - moved from GPIO 3
 	StopIn:     4,  // GPIO 4
 	ResetIn:    17, // GPIO 17
 	

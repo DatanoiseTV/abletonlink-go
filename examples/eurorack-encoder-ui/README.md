@@ -20,8 +20,8 @@ A bidirectional bridge between Eurorack modular synthesizers and Ableton Link, f
 ### Default Pin Assignment (BCM numbering)
 
 **Eurorack I/O:**
-- GPIO 2: External clock input (conflicts with I2C - see note below)
-- GPIO 3: Start trigger input (conflicts with I2C - see note below)
+- GPIO 7: External clock input
+- GPIO 8: Start trigger input
 - GPIO 4: Stop trigger input
 - GPIO 17: Reset trigger input
 - GPIO 18 (PWM0): 1 PPQN clock output
@@ -44,9 +44,8 @@ A bidirectional bridge between Eurorack modular synthesizers and Ableton Link, f
 - GPIO 6: Enter button
 - GPIO 13: Custom clock output (configurable divider)
 
-> **Note**: GPIO 2 and 3 are shared between I2C (for OLED) and Eurorack inputs. 
-> When using OLED mode, these pins cannot be used for external clock/start inputs.
-> Consider using GPIO 4 and 17 for essential triggers, or use a custom pin configuration.
+> **Note**: GPIO 2 and 3 are reserved for I2C communication with the OLED display.
+> All Eurorack inputs have been moved to other pins to avoid conflicts.
 
 ### Hardware Requirements
 
