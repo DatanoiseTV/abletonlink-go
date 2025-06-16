@@ -40,6 +40,8 @@ const (
 	MenuMain MenuState = iota
 	MenuTempo
 	MenuCustomClock
+	MenuPhaseOffset
+	MenuClockSwing
 	MenuPeers
 	MenuStatus
 	MenuSettings
@@ -65,6 +67,14 @@ var clockDividers = []ClockDivider{
 	{"1/32 Note", 0.125},
 }
 
+// Clock output names for phase offset and swing configuration
+var clockOutputs = []string{
+	"clock1",  // 1 PPQN
+	"clock2",  // 2 PPQN
+	"clock4",  // 4 PPQN
+	"clock24", // 24 PPQN
+}
+
 // OLEDDisplay manages the OLED display and encoder interface
 type OLEDDisplay struct {
 	bridge    *EurorackLinkBridge
@@ -84,6 +94,11 @@ type OLEDDisplay struct {
 	tempValue       int
 	customDivider   int // Index into clockDividers
 	lastCustomPulse time.Time
+	
+	// Phase offset and swing editing
+	selectedOutput    string  // Currently selected output for editing
+	tempPhaseOffset   float64 // Temporary phase offset value during editing
+	tempSwingAmount   float64 // Temporary swing amount value during editing
 	
 	// Display buffer
 	img    *image.RGBA
@@ -175,6 +190,7 @@ func NewOLEDDisplay(bridge *EurorackLinkBridge) (*OLEDDisplay, error) {
 		encoderLines:  make(map[string]*gpiocdev.Line),
 		currentMenu:   MenuMain,
 		customDivider: 3, // Default to 4 PPQN
+		selectedOutput: "clock4", // Default to 4 PPQN output
 		img:           img,
 		bounds:        bounds,
 		stopUpdate:    make(chan bool),
@@ -307,9 +323,11 @@ func (o *OLEDDisplay) handleMenuNavigation() {
 	
 	switch o.currentMenu {
 	case MenuMain:
-		o.menuIndex = (o.menuIndex + delta + 5) % 5 // 5 main menu items
+		o.menuIndex = (o.menuIndex + delta + 7) % 7 // 7 main menu items
 	case MenuCustomClock:
 		o.menuIndex = (o.menuIndex + delta + len(clockDividers)) % len(clockDividers)
+	case MenuPhaseOffset, MenuClockSwing:
+		o.menuIndex = (o.menuIndex + delta + len(clockOutputs)) % len(clockOutputs)
 	}
 }
 
@@ -339,6 +357,22 @@ func (o *OLEDDisplay) handleEditModeRotation() {
 		}
 	case MenuCustomClock:
 		o.customDivider = (o.customDivider + delta + len(clockDividers)) % len(clockDividers)
+	case MenuPhaseOffset:
+		o.tempPhaseOffset += float64(delta) * 0.01 // 1% increments
+		if o.tempPhaseOffset < 0.0 {
+			o.tempPhaseOffset = 0.0
+		}
+		if o.tempPhaseOffset > 1.0 {
+			o.tempPhaseOffset = 1.0
+		}
+	case MenuClockSwing:
+		o.tempSwingAmount += float64(delta) * 0.01 // 1% increments
+		if o.tempSwingAmount < 0.0 {
+			o.tempSwingAmount = 0.0
+		}
+		if o.tempSwingAmount > 1.0 {
+			o.tempSwingAmount = 1.0
+		}
 	}
 }
 
@@ -351,6 +385,10 @@ func (o *OLEDDisplay) handleEncoderButton() {
 			o.bridge.setTempo(float64(o.tempValue))
 		case MenuCustomClock:
 			// Custom divider is already set by rotation
+		case MenuPhaseOffset:
+			o.bridge.setPhaseOffset(o.selectedOutput, o.tempPhaseOffset)
+		case MenuClockSwing:
+			o.bridge.setSwingAmount(o.selectedOutput, o.tempSwingAmount)
 		}
 		o.editMode = false
 	} else {
@@ -365,14 +403,26 @@ func (o *OLEDDisplay) handleEncoderButton() {
 			case 1:
 				o.currentMenu = MenuCustomClock
 			case 2:
-				o.currentMenu = MenuPeers
+				o.currentMenu = MenuPhaseOffset
 			case 3:
-				o.currentMenu = MenuStatus
+				o.currentMenu = MenuClockSwing
 			case 4:
+				o.currentMenu = MenuPeers
+			case 5:
+				o.currentMenu = MenuStatus
+			case 6:
 				o.currentMenu = MenuSettings
 			}
 		case MenuCustomClock:
 			o.customDivider = o.menuIndex
+			o.editMode = true
+		case MenuPhaseOffset:
+			o.selectedOutput = clockOutputs[o.menuIndex]
+			o.tempPhaseOffset = o.bridge.getPhaseOffset(o.selectedOutput)
+			o.editMode = true
+		case MenuClockSwing:
+			o.selectedOutput = clockOutputs[o.menuIndex]
+			o.tempSwingAmount = o.bridge.getSwingAmount(o.selectedOutput)
 			o.editMode = true
 		}
 	}
@@ -405,6 +455,50 @@ func (b *EurorackLinkBridge) setTempo(tempo float64) {
 	b.mu.Unlock()
 	
 	b.logInfo("Tempo set to %.1f BPM", tempo)
+}
+
+// setPhaseOffset sets the phase offset for a specific output
+func (b *EurorackLinkBridge) setPhaseOffset(output string, offset float64) {
+	b.mu.Lock()
+	b.phaseOffsets[output] = offset
+	b.mu.Unlock()
+	
+	b.logInfo("Phase offset for %s set to %.1f° (%.3f)", output, offset*360, offset)
+	b.saveConfig() // Auto-save on change
+}
+
+// getPhaseOffset gets the phase offset for a specific output
+func (b *EurorackLinkBridge) getPhaseOffset(output string) float64 {
+	b.mu.RLock()
+	offset, exists := b.phaseOffsets[output]
+	b.mu.RUnlock()
+	
+	if !exists {
+		return 0.0 // Default to no offset
+	}
+	return offset
+}
+
+// setSwingAmount sets the swing amount for a specific output
+func (b *EurorackLinkBridge) setSwingAmount(output string, swing float64) {
+	b.mu.Lock()
+	b.swingAmounts[output] = swing
+	b.mu.Unlock()
+	
+	b.logInfo("Swing amount for %s set to %.1f%% (%.3f)", output, swing*100, swing)
+	b.saveConfig() // Auto-save on change
+}
+
+// getSwingAmount gets the swing amount for a specific output
+func (b *EurorackLinkBridge) getSwingAmount(output string) float64 {
+	b.mu.RLock()
+	swing, exists := b.swingAmounts[output]
+	b.mu.RUnlock()
+	
+	if !exists {
+		return 0.0 // Default to no swing
+	}
+	return swing
 }
 
 // startUpdateLoop begins the display update routine
@@ -478,6 +572,10 @@ func (o *OLEDDisplay) updateDisplay() {
 		o.drawTempoMenu()
 	case MenuCustomClock:
 		o.drawCustomClockMenu()
+	case MenuPhaseOffset:
+		o.drawPhaseOffsetMenu()
+	case MenuClockSwing:
+		o.drawClockSwingMenu()
 	case MenuPeers:
 		o.drawPeersMenu()
 	case MenuStatus:
@@ -494,7 +592,9 @@ func (o *OLEDDisplay) updateDisplay() {
 func (o *OLEDDisplay) drawMainMenu() {
 	menuItems := []string{
 		"Tempo",
-		"Custom Clock", 
+		"Custom Clock",
+		"Phase Offset",
+		"Clock Swing", 
 		"Peers",
 		"Status",
 		"Settings",
@@ -532,6 +632,50 @@ func (o *OLEDDisplay) drawCustomClockMenu() {
 	divider := clockDividers[o.customDivider]
 	o.drawText(0, 32, fmt.Sprintf("Type: %s", divider.Name), true)
 	o.drawText(0, 48, fmt.Sprintf("Div: %.3f", divider.Divider), false)
+}
+
+// drawPhaseOffsetMenu draws the phase offset configuration menu
+func (o *OLEDDisplay) drawPhaseOffsetMenu() {
+	o.drawText(0, 0, "PHASE OFFSET", false)
+	o.drawText(0, 16, "============", false)
+	
+	if o.editMode {
+		output := o.selectedOutput
+		degrees := int(o.tempPhaseOffset * 360)
+		o.drawText(0, 28, fmt.Sprintf("Output: %s", output), false)
+		o.drawText(0, 40, fmt.Sprintf("Phase: %d°", degrees), true)
+		o.drawText(0, 52, "Press to save", false)
+	} else {
+		for i, output := range clockOutputs {
+			selected := i == o.menuIndex
+			offset := o.bridge.getPhaseOffset(output)
+			degrees := int(offset * 360)
+			text := fmt.Sprintf("%s: %d°", output, degrees)
+			o.drawText(8, 28+i*8, text, selected)
+		}
+	}
+}
+
+// drawClockSwingMenu draws the clock swing configuration menu
+func (o *OLEDDisplay) drawClockSwingMenu() {
+	o.drawText(0, 0, "CLOCK SWING", false)
+	o.drawText(0, 16, "===========", false)
+	
+	if o.editMode {
+		output := o.selectedOutput
+		percent := int(o.tempSwingAmount * 100)
+		o.drawText(0, 28, fmt.Sprintf("Output: %s", output), false)
+		o.drawText(0, 40, fmt.Sprintf("Swing: %d%%", percent), true)
+		o.drawText(0, 52, "Press to save", false)
+	} else {
+		for i, output := range clockOutputs {
+			selected := i == o.menuIndex
+			swing := o.bridge.getSwingAmount(output)
+			percent := int(swing * 100)
+			text := fmt.Sprintf("%s: %d%%", output, percent)
+			o.drawText(8, 28+i*8, text, selected)
+		}
+	}
 }
 
 // drawPeersMenu draws the Link peers information

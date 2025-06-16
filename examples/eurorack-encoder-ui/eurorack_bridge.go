@@ -130,15 +130,21 @@ type EurorackLinkBridge struct {
 	
 	// Configuration
 	configPath string
+	
+	// Clock timing adjustments
+	phaseOffsets map[string]float64 // Phase offset per output (0.0-1.0 = 0-360°)
+	swingAmounts map[string]float64 // Swing amount per output (0.0-1.0 = 0-100%)
 }
 
 // Config represents the saved configuration
 type Config struct {
-	Pins                GPIOPins `json:"gpio_pins"`
-	ExternalSyncEnabled bool     `json:"external_sync_enabled"`
-	QuantizeToBar       bool     `json:"quantize_to_bar"`
-	BeatsPerBar         int      `json:"beats_per_bar"`
-	InitialTempo        float64  `json:"initial_tempo"`
+	Pins                GPIOPins           `json:"gpio_pins"`
+	ExternalSyncEnabled bool               `json:"external_sync_enabled"`
+	QuantizeToBar       bool               `json:"quantize_to_bar"`
+	BeatsPerBar         int                `json:"beats_per_bar"`
+	InitialTempo        float64            `json:"initial_tempo"`
+	PhaseOffsets        map[string]float64 `json:"phase_offsets"`
+	SwingAmounts        map[string]float64 `json:"swing_amounts"`
 }
 
 // NewEurorackLinkBridge creates a new Eurorack-Link bridge instance
@@ -170,6 +176,8 @@ func NewEurorackLinkBridge(tempo float64, externalSync bool, uiEnabled bool, ole
 		configPath:          filepath.Join(os.ExpandEnv("$HOME"), ".eurorack-link-bridge.json"),
 		inputLines:          make(map[string]*gpiocdev.Line),
 		outputLines:         make(map[string]*gpiocdev.Line),
+		phaseOffsets:        make(map[string]float64),
+		swingAmounts:        make(map[string]float64),
 	}
 	
 	// Load configuration
@@ -464,29 +472,56 @@ func (b *EurorackLinkBridge) runClockOutput() {
 			
 			currentTime := b.link.ClockMicros()
 			
-			// Calculate current beat positions for different divisions
-			beat1 := b.state.BeatAtTime(currentTime, 1.0)   // 1 PPQN
-			beat2 := b.state.BeatAtTime(currentTime, 0.5)   // 2 PPQN
-			beat4 := b.state.BeatAtTime(currentTime, 0.25)  // 4 PPQN
-			beat24 := b.state.BeatAtTime(currentTime, 1.0/24.0) // 24 PPQN
-			
-			// Generate pulses when crossing beat boundaries
-			if int(beat1) > int(lastBeat1) {
-				b.sendPulse("clock1")
-			}
-			if int(beat2) > int(lastBeat2) {
-				b.sendPulse("clock2")
-			}
-			if int(beat4) > int(lastBeat4) {
-				b.sendPulse("clock4")
-			}
-			if int(beat24) > int(lastBeat24) {
-				b.sendPulse("clock24")
-			}
-			
-			lastBeat1, lastBeat2, lastBeat4, lastBeat24 = beat1, beat2, beat4, beat24
+			// Generate pulses for each output with phase offset and swing
+			b.generateClockPulse("clock1", 1.0, currentTime, &lastBeat1)
+			b.generateClockPulse("clock2", 0.5, currentTime, &lastBeat2)
+			b.generateClockPulse("clock4", 0.25, currentTime, &lastBeat4)
+			b.generateClockPulse("clock24", 1.0/24.0, currentTime, &lastBeat24)
 		}
 	}
+}
+
+// generateClockPulse generates a clock pulse with phase offset and swing
+func (b *EurorackLinkBridge) generateClockPulse(output string, quantum float64, currentTime int64, lastBeat *float64) {
+	// Get phase offset and swing amount for this output
+	phaseOffset := b.getPhaseOffset(output)
+	swingAmount := b.getSwingAmount(output)
+	
+	// Calculate beat position with phase offset
+	beat := b.state.BeatAtTime(currentTime, quantum)
+	
+	// Apply phase offset (0.0-1.0 represents 0-360° of a beat)
+	offsetBeat := beat + phaseOffset/quantum
+	
+	// Check if we crossed a beat boundary
+	if int(offsetBeat) > int(*lastBeat + phaseOffset/quantum) {
+		// Calculate timing adjustment for swing
+		var timingOffset int64 = 0
+		
+		if swingAmount > 0.0 {
+			// Apply swing by delaying every other pulse
+			beatNumber := int(offsetBeat)
+			if beatNumber%2 == 1 { // Odd beats get delayed
+				// Swing delay is a percentage of the beat interval
+				beatInterval := 60_000_000 / (b.lastLinkTempo * quantum) // microseconds per beat
+				maxDelay := beatInterval / 2 // Maximum delay is half a beat
+				timingOffset = int64(float64(maxDelay) * swingAmount)
+			}
+		}
+		
+		if timingOffset > 0 {
+			// Schedule delayed pulse
+			go func() {
+				time.Sleep(time.Duration(timingOffset) * time.Microsecond)
+				b.sendPulse(output)
+			}()
+		} else {
+			// Send pulse immediately
+			b.sendPulse(output)
+		}
+	}
+	
+	*lastBeat = beat
 }
 
 // sendPulse sends a trigger pulse to the specified output
@@ -599,16 +634,42 @@ func (b *EurorackLinkBridge) loadConfig() {
 	if !isFlagPassed("tempo") && cfg.InitialTempo > 0 {
 		b.lastLinkTempo = cfg.InitialTempo
 	}
+	
+	// Load phase offsets and swing amounts
+	b.mu.Lock()
+	if cfg.PhaseOffsets != nil {
+		for k, v := range cfg.PhaseOffsets {
+			b.phaseOffsets[k] = v
+		}
+	}
+	if cfg.SwingAmounts != nil {
+		for k, v := range cfg.SwingAmounts {
+			b.swingAmounts[k] = v
+		}
+	}
+	b.mu.Unlock()
 }
 
 func (b *EurorackLinkBridge) saveConfig() {
+	b.mu.RLock()
 	cfg := Config{
 		Pins:                b.pins,
 		ExternalSyncEnabled: b.externalSyncEnabled,
 		QuantizeToBar:       b.quantizeToBar,
 		BeatsPerBar:         b.beatsPerBar,
 		InitialTempo:        b.lastLinkTempo,
+		PhaseOffsets:        make(map[string]float64),
+		SwingAmounts:        make(map[string]float64),
 	}
+	
+	// Copy phase offsets and swing amounts
+	for k, v := range b.phaseOffsets {
+		cfg.PhaseOffsets[k] = v
+	}
+	for k, v := range b.swingAmounts {
+		cfg.SwingAmounts[k] = v
+	}
+	b.mu.RUnlock()
 	
 	data, err := json.MarshalIndent(cfg, "", "  ")
 	if err != nil {
