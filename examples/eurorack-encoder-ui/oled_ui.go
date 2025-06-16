@@ -343,17 +343,22 @@ func (o *OLEDDisplay) handleRotaryEncoder(input string, evt gpiocdev.LineEvent, 
 	// Combine states into a 2-bit value for quadrature decoding
 	currentState := (stateA << 1) | stateB
 	
-	// Quadrature state transition table for proper half-step support
-	// Forward:  00 -> 01 -> 11 -> 10 -> 00
-	// Backward: 00 -> 10 -> 11 -> 01 -> 00
+	// Full detent quadrature decoding - only trigger on complete detent clicks
+	// This prevents over-sensitivity and matches physical encoder feel
 	var direction int
 	switch (o.lastEncoderState << 2) | currentState {
-	case 0x01, 0x07, 0x08, 0x0E: // Forward transitions
+	case 0x02: // 00 -> 10 (start of clockwise)
+		o.lastEncoderState = currentState
+		return // Wait for complete sequence
+	case 0x08: // 10 -> 00 (complete clockwise detent)
 		direction = 1
-	case 0x02, 0x04, 0x0B, 0x0D: // Backward transitions
+	case 0x01: // 00 -> 01 (start of counter-clockwise) 
+		o.lastEncoderState = currentState
+		return // Wait for complete sequence
+	case 0x04: // 01 -> 00 (complete counter-clockwise detent)
 		direction = -1
 	default:
-		// Invalid transition or no change
+		// Track intermediate states but don't trigger
 		o.lastEncoderState = currentState
 		return
 	}
