@@ -162,9 +162,12 @@ func NewOLEDDisplay(bridge *EurorackLinkBridge) (*OLEDDisplay, error) {
 		return nil, fmt.Errorf("failed to initialize OLED display at any bus/address. Last error: %v", err)
 	}
 	
-	// Use the display's built-in image buffer
+	// Use the display's built-in image buffer with type assertion
 	bounds := display.Img.Bounds()
-	img := display.Img
+	img, ok := display.Img.(*image.RGBA)
+	if !ok {
+		return nil, fmt.Errorf("display image is not RGBA format")
+	}
 	
 	oled := &OLEDDisplay{
 		bridge:        bridge,
