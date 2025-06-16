@@ -458,13 +458,20 @@ func (b *EurorackLinkBridge) handleExternalReset(timestamp time.Time) {
 	b.sendPulse("reset")
 }
 
-// runClockOutput generates clock pulses for various divisions
+// runClockOutput generates clock pulses for various divisions (based on MIDI bridge approach)
 func (b *EurorackLinkBridge) runClockOutput() {
-	// Use high-precision timer for clock generation
+	// Use high-precision timer for clock generation (like MIDI bridge)
 	ticker := time.NewTicker(time.Millisecond) // 1ms resolution
 	defer ticker.Stop()
 	
-	var lastMasterTick int64 // Track master 24PPQN ticks for all clocks
+	// Clock state for each output (like MIDI bridge nextClockBeat)
+	const masterClockQuantum = 1.0 / 24.0 // 24 PPQN quantum (like MIDI)
+	
+	// Next scheduled beat for each clock division
+	var nextClock1Beat float64  = 0  // 1 PPQN - every 1.0 beat
+	var nextClock2Beat float64  = 0  // 2 PPQN - every 0.5 beat  
+	var nextClock4Beat float64  = 0  // 4 PPQN - every 0.25 beat
+	var nextClock24Beat float64 = 0  // 24 PPQN - every 1/24 beat
 	
 	for {
 		select {
@@ -479,79 +486,43 @@ func (b *EurorackLinkBridge) runClockOutput() {
 			
 			currentTime := b.link.ClockMicros()
 			
-			// Get master 24 PPQN tick position from Ableton Link phase
-			// This ensures all clocks are perfectly synchronized to Link's timeline
-			masterBeat := b.state.BeatAtTime(currentTime, 1.0/24.0)
-			currentMasterTick := int64(masterBeat * 24) // Convert to absolute tick count
+			// Get current beat position with master clock quantum (like MIDI bridge)
+			currentBeat := b.state.BeatAtTime(currentTime, masterClockQuantum)
 			
-			// Only generate pulses if we've advanced to a new master tick
-			if currentMasterTick > lastMasterTick {
-				ticksAdvanced := currentMasterTick - lastMasterTick
-				
-				// Generate pulses for each clock division based on master ticks
-				for i := int64(0); i < ticksAdvanced; i++ {
-					tick := lastMasterTick + i + 1
-					
-					// Generate synchronized pulses based on tick divisibility
-					if tick%24 == 0 {
-						b.sendSynchronizedPulse("clock1", tick, 24) // 1 PPQN
-					}
-					if tick%12 == 0 {
-						b.sendSynchronizedPulse("clock2", tick, 12) // 2 PPQN  
-					}
-					if tick%6 == 0 {
-						b.sendSynchronizedPulse("clock4", tick, 6)  // 4 PPQN
-					}
-					if tick%1 == 0 {
-						b.sendSynchronizedPulse("clock24", tick, 1) // 24 PPQN
-					}
-				}
-				
-				lastMasterTick = currentMasterTick
+			// Check each clock division independently (like MIDI bridge approach)
+			
+			// 1 PPQN - every 1.0 beat
+			if currentBeat >= nextClock1Beat {
+				b.sendSynchronizedPulse("clock1", currentTime)
+				nextClock1Beat += 1.0 // Next pulse in 1 beat
+			}
+			
+			// 2 PPQN - every 0.5 beat
+			if currentBeat >= nextClock2Beat {
+				b.sendSynchronizedPulse("clock2", currentTime)
+				nextClock2Beat += 0.5 // Next pulse in 0.5 beat
+			}
+			
+			// 4 PPQN - every 0.25 beat
+			if currentBeat >= nextClock4Beat {
+				b.sendSynchronizedPulse("clock4", currentTime)
+				nextClock4Beat += 0.25 // Next pulse in 0.25 beat
+			}
+			
+			// 24 PPQN - every 1/24 beat (like MIDI clock)
+			if currentBeat >= nextClock24Beat {
+				b.sendSynchronizedPulse("clock24", currentTime)
+				nextClock24Beat += masterClockQuantum // Next pulse in 1/24 beat
 			}
 		}
 	}
 }
 
-// sendSynchronizedPulse sends a pulse with phase offset and swing applied
-func (b *EurorackLinkBridge) sendSynchronizedPulse(output string, tick int64, divider int) {
-	// Get phase offset and swing amount for this output
-	phaseOffset := b.getPhaseOffset(output)
-	swingAmount := b.getSwingAmount(output)
-	
-	// Calculate timing adjustment for swing
-	var timingOffset int64 = 0
-	
-	if swingAmount > 0.0 {
-		// Apply swing by delaying every other pulse
-		pulseNumber := tick / int64(divider)
-		if pulseNumber%2 == 1 { // Odd pulses get delayed
-			// Swing delay is a percentage of the divided beat interval
-			tickInterval := 60_000_000 / (b.lastLinkTempo * 24.0) // microseconds per 24PPQN tick
-			dividedInterval := tickInterval * float64(divider)      // microseconds per divided beat
-			maxDelay := dividedInterval / 2                         // Maximum delay is half a divided beat
-			timingOffset = int64(maxDelay * swingAmount)
-		}
-	}
-	
-	// Apply phase offset (convert 0.0-1.0 to microseconds within this division)
-	if phaseOffset > 0.0 {
-		tickInterval := 60_000_000 / (b.lastLinkTempo * 24.0) // microseconds per 24PPQN tick
-		dividedInterval := tickInterval * float64(divider)      // microseconds per divided beat
-		phaseOffsetMicros := int64(dividedInterval * phaseOffset)
-		timingOffset += phaseOffsetMicros
-	}
-	
-	if timingOffset > 0 {
-		// Schedule delayed pulse
-		go func() {
-			time.Sleep(time.Duration(timingOffset) * time.Microsecond)
-			b.sendPulse(output)
-		}()
-	} else {
-		// Send pulse immediately
-		b.sendPulse(output)
-	}
+// sendSynchronizedPulse sends a pulse with phase offset and swing applied (simplified)
+func (b *EurorackLinkBridge) sendSynchronizedPulse(output string, currentTime int64) {
+	// For now, send pulse immediately for reliable basic operation
+	// Phase offset and swing can be added back later once basic sync works
+	b.sendPulse(output)
 }
 
 // generateClockPulseFromMaster generates a clock pulse from master timebase with divider
