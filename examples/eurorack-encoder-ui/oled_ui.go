@@ -104,6 +104,11 @@ type OLEDDisplay struct {
 	img    *image.RGBA
 	bounds image.Rectangle
 	
+	// Display dimensions
+	displayWidth  int
+	displayHeight int
+	is32Display   bool // True for 128x32, false for 128x64
+	
 	// Update control
 	updateTicker *time.Ticker
 	stopUpdate   chan bool
@@ -157,18 +162,31 @@ func NewOLEDDisplay(bridge *EurorackLinkBridge) (*OLEDDisplay, error) {
 	addresses := []uint16{0x3C, 0x3D}
 	var display *ssd1306.Dev
 	
+	// Determine display dimensions based on mode
+	displayWidth := 128
+	displayHeight := 64
+	is32Display := false
+	
+	if bridge.oled32Mode {
+		displayHeight = 32
+		is32Display = true
+		bridge.logInfo("Configuring for 128x32 display")
+	} else {
+		bridge.logInfo("Configuring for 128x64 display")
+	}
+	
 	for _, addr := range addresses {
 		bridge.logInfo("Trying SSD1306 at I2C address 0x%02X...", addr)
 		
-		// Initialize SSD1306 OLED display with specific address
+		// Initialize SSD1306 OLED display with specific address and dimensions
 		display, err = ssd1306.NewI2C(bus, &ssd1306.Opts{
-			W:       128,
-			H:       64,
+			W:       displayWidth,
+			H:       displayHeight,
 			Rotated: false,
 		})
 		
 		if err == nil {
-			bridge.logInfo("SSD1306 initialized successfully at address 0x%02X", addr)
+			bridge.logInfo("SSD1306 %dx%d initialized successfully at address 0x%02X", displayWidth, displayHeight, addr)
 			break
 		} else {
 			bridge.logInfo("Failed to initialize SSD1306 at address 0x%02X: %v", addr, err)
@@ -193,6 +211,9 @@ func NewOLEDDisplay(bridge *EurorackLinkBridge) (*OLEDDisplay, error) {
 		selectedOutput: "clock4", // Default to 4 PPQN output
 		img:           img,
 		bounds:        bounds,
+		displayWidth:  displayWidth,
+		displayHeight: displayHeight,
+		is32Display:   is32Display,
 		stopUpdate:    make(chan bool),
 	}
 	
@@ -600,6 +621,15 @@ func (o *OLEDDisplay) drawMainMenu() {
 		"Settings",
 	}
 	
+	if o.is32Display {
+		o.drawMainMenu32(menuItems)
+	} else {
+		o.drawMainMenu64(menuItems)
+	}
+}
+
+// drawMainMenu64 draws the main menu for 128x64 displays
+func (o *OLEDDisplay) drawMainMenu64(menuItems []string) {
 	o.drawText(0, 0, "EURORACK LINK", false)
 	o.drawText(0, 16, "==============", false)
 	
@@ -609,8 +639,41 @@ func (o *OLEDDisplay) drawMainMenu() {
 	}
 }
 
+// drawMainMenu32 draws the main menu for 128x32 displays (compact layout)
+func (o *OLEDDisplay) drawMainMenu32(menuItems []string) {
+	// Show only current selection and adjacent items for 32px height
+	currentItem := menuItems[o.menuIndex]
+	
+	// Title line
+	o.drawText(0, 0, "EURORACK", false)
+	
+	// Show previous item (if exists)
+	if o.menuIndex > 0 {
+		prevItem := menuItems[o.menuIndex-1]
+		o.drawText(8, 8, prevItem, false)
+	}
+	
+	// Show current item (highlighted)
+	o.drawText(0, 16, "> " + currentItem, true)
+	
+	// Show next item (if exists)
+	if o.menuIndex < len(menuItems)-1 {
+		nextItem := menuItems[o.menuIndex+1]
+		o.drawText(8, 24, nextItem, false)
+	}
+}
+
 // drawTempoMenu draws the tempo adjustment menu
 func (o *OLEDDisplay) drawTempoMenu() {
+	if o.is32Display {
+		o.drawTempoMenu32()
+	} else {
+		o.drawTempoMenu64()
+	}
+}
+
+// drawTempoMenu64 draws the tempo menu for 128x64 displays
+func (o *OLEDDisplay) drawTempoMenu64() {
 	o.drawText(0, 0, "TEMPO", false)
 	o.drawText(0, 16, "=====", false)
 	
@@ -621,6 +684,22 @@ func (o *OLEDDisplay) drawTempoMenu() {
 		tempo := int(o.bridge.lastLinkTempo)
 		o.drawText(0, 32, fmt.Sprintf("BPM: %d", tempo), false)
 		o.drawText(0, 48, "Press to edit", false)
+	}
+}
+
+// drawTempoMenu32 draws the tempo menu for 128x32 displays
+func (o *OLEDDisplay) drawTempoMenu32() {
+	o.drawText(0, 0, "TEMPO", false)
+	
+	if o.editMode {
+		o.drawText(0, 8, fmt.Sprintf("BPM: %d", o.tempValue), true)
+		o.drawText(0, 16, "Rotate: adjust", false)
+		o.drawText(0, 24, "Press: save", false)
+	} else {
+		tempo := int(o.bridge.lastLinkTempo)
+		o.drawText(0, 8, fmt.Sprintf("BPM: %d", tempo), false)
+		o.drawText(0, 16, "Press: edit", false)
+		o.drawText(0, 24, "Back: menu", false)
 	}
 }
 
@@ -636,6 +715,15 @@ func (o *OLEDDisplay) drawCustomClockMenu() {
 
 // drawPhaseOffsetMenu draws the phase offset configuration menu
 func (o *OLEDDisplay) drawPhaseOffsetMenu() {
+	if o.is32Display {
+		o.drawPhaseOffsetMenu32()
+	} else {
+		o.drawPhaseOffsetMenu64()
+	}
+}
+
+// drawPhaseOffsetMenu64 draws the phase offset menu for 128x64 displays
+func (o *OLEDDisplay) drawPhaseOffsetMenu64() {
 	o.drawText(0, 0, "PHASE OFFSET", false)
 	o.drawText(0, 16, "============", false)
 	
@@ -656,8 +744,39 @@ func (o *OLEDDisplay) drawPhaseOffsetMenu() {
 	}
 }
 
+// drawPhaseOffsetMenu32 draws the phase offset menu for 128x32 displays
+func (o *OLEDDisplay) drawPhaseOffsetMenu32() {
+	o.drawText(0, 0, "PHASE", false)
+	
+	if o.editMode {
+		output := o.selectedOutput
+		degrees := int(o.tempPhaseOffset * 360)
+		o.drawText(0, 8, fmt.Sprintf("%s: %d°", output, degrees), true)
+		o.drawText(0, 16, "Rotate: adjust", false)
+		o.drawText(0, 24, "Press: save", false)
+	} else {
+		// Show current selection with navigation context
+		output := clockOutputs[o.menuIndex]
+		offset := o.bridge.getPhaseOffset(output)
+		degrees := int(offset * 360)
+		
+		o.drawText(0, 8, fmt.Sprintf("> %s", output), true)
+		o.drawText(0, 16, fmt.Sprintf("  %d°", degrees), false)
+		o.drawText(0, 24, "Press: edit", false)
+	}
+}
+
 // drawClockSwingMenu draws the clock swing configuration menu
 func (o *OLEDDisplay) drawClockSwingMenu() {
+	if o.is32Display {
+		o.drawClockSwingMenu32()
+	} else {
+		o.drawClockSwingMenu64()
+	}
+}
+
+// drawClockSwingMenu64 draws the clock swing menu for 128x64 displays
+func (o *OLEDDisplay) drawClockSwingMenu64() {
 	o.drawText(0, 0, "CLOCK SWING", false)
 	o.drawText(0, 16, "===========", false)
 	
@@ -678,8 +797,39 @@ func (o *OLEDDisplay) drawClockSwingMenu() {
 	}
 }
 
+// drawClockSwingMenu32 draws the clock swing menu for 128x32 displays
+func (o *OLEDDisplay) drawClockSwingMenu32() {
+	o.drawText(0, 0, "SWING", false)
+	
+	if o.editMode {
+		output := o.selectedOutput
+		percent := int(o.tempSwingAmount * 100)
+		o.drawText(0, 8, fmt.Sprintf("%s: %d%%", output, percent), true)
+		o.drawText(0, 16, "Rotate: adjust", false)
+		o.drawText(0, 24, "Press: save", false)
+	} else {
+		// Show current selection with navigation context
+		output := clockOutputs[o.menuIndex]
+		swing := o.bridge.getSwingAmount(output)
+		percent := int(swing * 100)
+		
+		o.drawText(0, 8, fmt.Sprintf("> %s", output), true)
+		o.drawText(0, 16, fmt.Sprintf("  %d%%", percent), false)
+		o.drawText(0, 24, "Press: edit", false)
+	}
+}
+
 // drawPeersMenu draws the Link peers information
 func (o *OLEDDisplay) drawPeersMenu() {
+	if o.is32Display {
+		o.drawPeersMenu32()
+	} else {
+		o.drawPeersMenu64()
+	}
+}
+
+// drawPeersMenu64 draws the peers menu for 128x64 displays
+func (o *OLEDDisplay) drawPeersMenu64() {
 	o.drawText(0, 0, "LINK PEERS", false)
 	o.drawText(0, 16, "==========", false)
 	
@@ -693,8 +843,32 @@ func (o *OLEDDisplay) drawPeersMenu() {
 	}
 }
 
+// drawPeersMenu32 draws the peers menu for 128x32 displays
+func (o *OLEDDisplay) drawPeersMenu32() {
+	o.drawText(0, 0, "PEERS", false)
+	
+	peers := o.bridge.link.NumPeers()
+	o.drawText(0, 8, fmt.Sprintf("Count: %d", peers), false)
+	
+	if peers > 0 {
+		o.drawText(0, 16, "Status: Active", false)
+	} else {
+		o.drawText(0, 16, "Status: None", false)
+	}
+	o.drawText(0, 24, "Back: menu", false)
+}
+
 // drawStatusMenu draws the system status
 func (o *OLEDDisplay) drawStatusMenu() {
+	if o.is32Display {
+		o.drawStatusMenu32()
+	} else {
+		o.drawStatusMenu64()
+	}
+}
+
+// drawStatusMenu64 draws the status menu for 128x64 displays
+func (o *OLEDDisplay) drawStatusMenu64() {
 	o.drawText(0, 0, "STATUS", false)
 	o.drawText(0, 16, "======", false)
 	
@@ -717,8 +891,41 @@ func (o *OLEDDisplay) drawStatusMenu() {
 	o.drawText(0, 52, fmt.Sprintf("BPM: %d", tempo), false)
 }
 
+// drawStatusMenu32 draws the status menu for 128x32 displays
+func (o *OLEDDisplay) drawStatusMenu32() {
+	o.drawText(0, 0, "STATUS", false)
+	
+	o.bridge.link.CaptureAppSessionState(o.bridge.state)
+	playing := o.bridge.state.IsPlaying()
+	tempo := int(o.bridge.lastLinkTempo)
+	
+	// Show most important info in compact form
+	if playing {
+		o.drawText(0, 8, "PLAY", true)
+	} else {
+		o.drawText(0, 8, "STOP", false)
+	}
+	
+	o.drawText(0, 16, fmt.Sprintf("BPM: %d", tempo), false)
+	
+	if o.bridge.externalSyncEnabled {
+		o.drawText(0, 24, "Ext Sync", false)
+	} else {
+		o.drawText(0, 24, "Link Mode", false)
+	}
+}
+
 // drawSettingsMenu draws the settings menu
 func (o *OLEDDisplay) drawSettingsMenu() {
+	if o.is32Display {
+		o.drawSettingsMenu32()
+	} else {
+		o.drawSettingsMenu64()
+	}
+}
+
+// drawSettingsMenu64 draws the settings menu for 128x64 displays
+func (o *OLEDDisplay) drawSettingsMenu64() {
 	o.drawText(0, 0, "SETTINGS", false)
 	o.drawText(0, 16, "========", false)
 	
@@ -726,6 +933,14 @@ func (o *OLEDDisplay) drawSettingsMenu() {
 	o.drawText(0, 36, "Sync Mode", false)
 	o.drawText(0, 44, "Reset", false)
 	o.drawText(0, 52, "About", false)
+}
+
+// drawSettingsMenu32 draws the settings menu for 128x32 displays
+func (o *OLEDDisplay) drawSettingsMenu32() {
+	o.drawText(0, 0, "SETTINGS", false)
+	o.drawText(0, 8, "GPIO Config", false)
+	o.drawText(0, 16, "Sync Mode", false)
+	o.drawText(0, 24, "Back: menu", false)
 }
 
 // drawText draws text at the specified position

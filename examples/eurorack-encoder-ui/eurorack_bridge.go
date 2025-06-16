@@ -73,6 +73,7 @@ var (
 	enableExternalSync = flag.Bool("enable-external-sync", false, "Enable external clock sync mode (external GPIO clock controls Link tempo)")
 	cuiMode           = flag.Bool("cui", false, "Enable console text UI with real-time monitoring and keyboard controls")
 	oledMode          = flag.Bool("oled", false, "Enable OLED display (SSD1306 128x64) with rotary encoder interface")
+	oled32Mode        = flag.Bool("oled128x32", false, "Enable OLED display (SSD1306 128x32) with rotary encoder interface")
 	realtimeMode      = flag.Bool("rt", false, "Enable real-time process priority for low-latency operation (requires privileges)")
 	configFile        = flag.String("config", "", "Load custom GPIO pin configuration from JSON file")
 	dryRun           = flag.Bool("dry-run", false, "Simulate GPIO operations without hardware access (for testing)")
@@ -123,6 +124,7 @@ type EurorackLinkBridge struct {
 	oled      *OLEDDisplay
 	uiEnabled bool
 	oledMode  bool
+	oled32Mode bool
 	
 	// Context for shutdown
 	ctx    context.Context
@@ -148,7 +150,7 @@ type Config struct {
 }
 
 // NewEurorackLinkBridge creates a new Eurorack-Link bridge instance
-func NewEurorackLinkBridge(tempo float64, externalSync bool, uiEnabled bool, oledEnabled bool, dryRun bool) (*EurorackLinkBridge, error) {
+func NewEurorackLinkBridge(tempo float64, externalSync bool, uiEnabled bool, oledEnabled bool, oled32Enabled bool, dryRun bool) (*EurorackLinkBridge, error) {
 	// Create Link instance
 	link := abletonlink.NewLink(tempo)
 	
@@ -171,6 +173,7 @@ func NewEurorackLinkBridge(tempo float64, externalSync bool, uiEnabled bool, ole
 		lastPulses:          make(map[string]time.Time),
 		uiEnabled:           uiEnabled,
 		oledMode:            oledEnabled,
+		oled32Mode:          oled32Enabled,
 		ctx:                 ctx,
 		cancel:              cancel,
 		configPath:          filepath.Join(os.ExpandEnv("$HOME"), ".eurorack-link-bridge.json"),
@@ -246,13 +249,17 @@ func (b *EurorackLinkBridge) Start() error {
 	}
 	
 	// Create OLED display if enabled
-	if b.oledMode && !b.dryRun {
+	if (b.oledMode || b.oled32Mode) && !b.dryRun {
 		oled, err := NewOLEDDisplay(b)
 		if err != nil {
 			b.logInfo("Failed to initialize OLED display: %v", err)
 		} else {
 			b.oled = oled
-			b.logInfo("OLED display initialized")
+			if b.oled32Mode {
+				b.logInfo("OLED 128x32 display initialized")
+			} else {
+				b.logInfo("OLED 128x64 display initialized")
+			}
 		}
 	}
 	
@@ -732,7 +739,10 @@ func showUsage() {
 	fmt.Printf("    Start basic bridge with default settings\n\n")
 	
 	fmt.Printf("  ./eurorack_bridge -oled -rt\n")
-	fmt.Printf("    OLED interface with real-time priority\n\n")
+	fmt.Printf("    OLED 128x64 interface with real-time priority\n\n")
+	
+	fmt.Printf("  ./eurorack_bridge -oled128x32\n")
+	fmt.Printf("    OLED 128x32 display with compact menu layout\n\n")
 	
 	fmt.Printf("  ./eurorack_bridge -cui -tempo 140\n")
 	fmt.Printf("    Console UI starting at 140 BPM\n\n")
@@ -803,7 +813,7 @@ func main() {
 	}
 	
 	// Create bridge
-	bridge, err := NewEurorackLinkBridge(*initialTempo, *enableExternalSync, *cuiMode, *oledMode, *dryRun)
+	bridge, err := NewEurorackLinkBridge(*initialTempo, *enableExternalSync, *cuiMode, *oledMode, *oled32Mode, *dryRun)
 	if err != nil {
 		log.Fatalf("Failed to create bridge: %v", err)
 	}
@@ -820,9 +830,13 @@ func main() {
 	if *cuiMode {
 		// Run TUI (blocks until quit)
 		<-sigChan
-	} else if *oledMode {
+	} else if *oledMode || *oled32Mode {
 		// Run with OLED display
-		fmt.Printf("Eurorack-Link Bridge with OLED running. Press Ctrl+C to stop.\n")
+		if *oled32Mode {
+			fmt.Printf("Eurorack-Link Bridge with OLED 128x32 running. Press Ctrl+C to stop.\n")
+		} else {
+			fmt.Printf("Eurorack-Link Bridge with OLED 128x64 running. Press Ctrl+C to stop.\n")
+		}
 		<-sigChan
 	} else {
 		// Simple wait for interrupt
