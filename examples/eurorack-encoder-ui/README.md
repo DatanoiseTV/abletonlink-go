@@ -13,7 +13,7 @@ A bidirectional bridge between Eurorack modular synthesizers and Ableton Link, f
 - **Console UI**: Optional text-based interface with keyboard controls
 - **Real-time performance**: Optional real-time priority for precise timing
 - **Eurorack compatible**: 5V tolerant inputs, proper trigger pulse widths
-- **Static builds**: Self-contained binaries for easy deployment
+- **Cross-platform**: Builds for Raspberry Pi and other Linux systems
 
 ## GPIO Pin Configuration
 
