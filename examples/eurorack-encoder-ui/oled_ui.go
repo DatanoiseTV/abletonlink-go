@@ -114,6 +114,12 @@ type OLEDDisplay struct {
 	// Update control
 	updateTicker *time.Ticker
 	stopUpdate   chan bool
+	needsUpdate  bool
+	updateMutex  sync.RWMutex
+	
+	// Fast encoder handling
+	encoderEvents chan EncoderEvent
+	stopEncoder   chan bool
 }
 
 // NewOLEDDisplay creates a new OLED display interface
@@ -183,6 +189,9 @@ func NewOLEDDisplay(bridge *EurorackLinkBridge) (*OLEDDisplay, error) {
 		displayHeight: displayHeight,
 		is32Display:   is32Display,
 		stopUpdate:    make(chan bool),
+		needsUpdate:   true, // Initial update needed
+		encoderEvents: make(chan EncoderEvent, 20), // Buffered for fast response
+		stopEncoder:   make(chan bool),
 	}
 	
 	// Initialize encoder GPIO
@@ -680,26 +689,26 @@ func (o *OLEDDisplay) drawMainMenu64(menuItems []string) {
 
 // drawMainMenu32 draws the main menu for 128x32 displays (compact layout)
 func (o *OLEDDisplay) drawMainMenu32(menuItems []string) {
-	// Show only current selection and adjacent items for 32px height
+	// Maximize space - show 3 items at once without title
 	currentItem := menuItems[o.menuIndex]
-	
-	// Title line
-	o.drawText(0, 0, "EURORACK", false)
 	
 	// Show previous item (if exists)
 	if o.menuIndex > 0 {
 		prevItem := menuItems[o.menuIndex-1]
-		o.drawText(8, 8, prevItem, false)
+		o.drawText(4, 0, prevItem, false)
 	}
 	
-	// Show current item (highlighted)
-	o.drawText(0, 16, "> " + currentItem, true)
+	// Show current item (highlighted, full width)
+	o.drawText(0, 10, "> " + currentItem, true)
 	
 	// Show next item (if exists)
 	if o.menuIndex < len(menuItems)-1 {
 		nextItem := menuItems[o.menuIndex+1]
-		o.drawText(8, 24, nextItem, false)
+		o.drawText(4, 22, nextItem, false)
 	}
+	
+	// Show position indicator in top right
+	o.drawText(110, 0, fmt.Sprintf("%d/%d", o.menuIndex+1, len(menuItems)), false)
 }
 
 // drawTempoMenu draws the tempo adjustment menu
@@ -728,17 +737,18 @@ func (o *OLEDDisplay) drawTempoMenu64() {
 
 // drawTempoMenu32 draws the tempo menu for 128x32 displays
 func (o *OLEDDisplay) drawTempoMenu32() {
-	o.drawText(0, 0, "TEMPO", false)
-	
 	if o.editMode {
-		o.drawText(0, 8, fmt.Sprintf("BPM: %d", o.tempValue), true)
-		o.drawText(0, 16, "Rotate: adjust", false)
-		o.drawText(0, 24, "Press: save", false)
+		// Large BPM display when editing
+		o.drawText(0, 0, fmt.Sprintf("BPM: %d", o.tempValue), true)
+		o.drawText(0, 12, "Rotate=adjust", false)
+		o.drawText(0, 22, "Press=save", false)
 	} else {
 		tempo := int(o.bridge.lastLinkTempo)
-		o.drawText(0, 8, fmt.Sprintf("BPM: %d", tempo), false)
-		o.drawText(0, 16, "Press: edit", false)
-		o.drawText(0, 24, "Back: menu", false)
+		// Show current tempo and link status
+		o.drawText(0, 0, fmt.Sprintf("Tempo: %d BPM", tempo), false)
+		peers := len(o.bridge.link.GetPeers())
+		o.drawText(0, 10, fmt.Sprintf("Peers: %d", peers), false)
+		o.drawText(0, 22, "Press=edit", false)
 	}
 }
 
