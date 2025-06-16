@@ -223,6 +223,9 @@ func NewOLEDDisplay(bridge *EurorackLinkBridge) (*OLEDDisplay, error) {
 		return nil, fmt.Errorf("failed to initialize encoder: %v", err)
 	}
 	
+	// Test the display with a simple pattern first
+	oled.testDisplay()
+	
 	// Start update loop
 	oled.startUpdateLoop()
 	
@@ -944,19 +947,159 @@ func (o *OLEDDisplay) drawSettingsMenu32() {
 	o.drawText(0, 24, "Back: menu", false)
 }
 
+// testDisplay draws a simple test pattern to verify the display is working
+func (o *OLEDDisplay) testDisplay() {
+	o.bridge.logInfo("Testing display with pattern...")
+	
+	// Fill with a simple pattern
+	for y := 0; y < o.displayHeight; y++ {
+		for x := 0; x < o.displayWidth; x++ {
+			var pixel color.RGBA
+			if (x+y)%8 < 4 {
+				pixel = color.RGBA{255, 255, 255, 255} // White
+			} else {
+				pixel = color.RGBA{0, 0, 0, 255} // Black
+			}
+			o.img.Set(x, y, pixel)
+		}
+	}
+	
+	// Update display with test pattern
+	o.display.Draw(o.img.Bounds(), o.img, image.Point{})
+	
+	// Wait 2 seconds to show the pattern
+	time.Sleep(2 * time.Second)
+	
+	o.bridge.logInfo("Test pattern complete, starting normal operation...")
+}
+
 // drawText draws text at the specified position
 func (o *OLEDDisplay) drawText(x, y int, text string, selected bool) {
-	// Simple bitmap font rendering - in a real implementation, 
-	// you'd use a proper font library like golang.org/x/image/font
+	// Simple bitmap font rendering using basic pixel drawing
 	if selected {
 		text = "> " + text
 	}
 	
-	// For now, just store the text - in real implementation,
-	// render to the image buffer using a bitmap font
-	_ = x
-	_ = y
-	_ = text
+	// Draw simple 5x7 characters (very basic implementation)
+	charWidth := 6
+	charHeight := 8
+	
+	for i, char := range text {
+		charX := x + i*charWidth
+		if charX >= o.displayWidth {
+			break // Don't draw off screen
+		}
+		
+		o.drawChar(charX, y, char, selected)
+	}
+}
+
+// drawChar draws a single character using a simple bitmap font
+func (o *OLEDDisplay) drawChar(x, y int, char rune, selected bool) {
+	// Very simple 5x7 bitmap font - just a few essential characters
+	var pattern [][]bool
+	
+	switch char {
+	case ' ':
+		pattern = [][]bool{{false, false, false, false, false}} // Space
+	case '>':
+		pattern = [][]bool{
+			{false, true, false, false, false},
+			{false, false, true, false, false},
+			{false, false, false, true, false},
+			{false, false, true, false, false},
+			{false, true, false, false, false},
+		}
+	case 'E':
+		pattern = [][]bool{
+			{true, true, true, true, true},
+			{true, false, false, false, false},
+			{true, true, true, false, false},
+			{true, false, false, false, false},
+			{true, true, true, true, true},
+		}
+	case 'U':
+		pattern = [][]bool{
+			{true, false, false, false, true},
+			{true, false, false, false, true},
+			{true, false, false, false, true},
+			{true, false, false, false, true},
+			{false, true, true, true, false},
+		}
+	case 'R':
+		pattern = [][]bool{
+			{true, true, true, true, false},
+			{true, false, false, false, true},
+			{true, true, true, true, false},
+			{true, false, true, false, false},
+			{true, false, false, true, false},
+		}
+	case 'O':
+		pattern = [][]bool{
+			{false, true, true, true, false},
+			{true, false, false, false, true},
+			{true, false, false, false, true},
+			{true, false, false, false, true},
+			{false, true, true, true, false},
+		}
+	case 'A':
+		pattern = [][]bool{
+			{false, true, true, true, false},
+			{true, false, false, false, true},
+			{true, true, true, true, true},
+			{true, false, false, false, true},
+			{true, false, false, false, true},
+		}
+	case 'C':
+		pattern = [][]bool{
+			{false, true, true, true, false},
+			{true, false, false, false, false},
+			{true, false, false, false, false},
+			{true, false, false, false, false},
+			{false, true, true, true, false},
+		}
+	case 'K':
+		pattern = [][]bool{
+			{true, false, false, false, true},
+			{true, false, false, true, false},
+			{true, true, true, false, false},
+			{true, false, false, true, false},
+			{true, false, false, false, true},
+		}
+	default:
+		// Default pattern for unknown characters - a simple rectangle
+		pattern = [][]bool{
+			{true, true, true, true, true},
+			{true, false, false, false, true},
+			{true, false, false, false, true},
+			{true, false, false, false, true},
+			{true, true, true, true, true},
+		}
+	}
+	
+	// Draw the character pattern
+	pixelColor := color.RGBA{255, 255, 255, 255} // White
+	if selected {
+		// Invert colors for selected text
+		for py := 0; py < len(pattern) && y+py < o.displayHeight; py++ {
+			for px := 0; px < len(pattern[py]) && x+px < o.displayWidth; px++ {
+				if pattern[py][px] {
+					o.img.Set(x+px, y+py, color.RGBA{0, 0, 0, 255}) // Black on white background
+				} else {
+					o.img.Set(x+px, y+py, color.RGBA{255, 255, 255, 255}) // White background
+				}
+			}
+		}
+	} else {
+		// Normal colors
+		for py := 0; py < len(pattern) && y+py < o.displayHeight; py++ {
+			for px := 0; px < len(pattern[py]) && x+px < o.displayWidth; px++ {
+				if pattern[py][px] {
+					o.img.Set(x+px, y+py, pixelColor)
+				}
+			}
+		}
+	}
 }
 
 // Stop shuts down the OLED display
