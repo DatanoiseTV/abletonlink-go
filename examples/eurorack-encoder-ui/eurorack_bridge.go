@@ -69,13 +69,14 @@ var defaultPins = GPIOPins{
 
 // Command line flags
 var (
-	initialTempo      = flag.Float64("tempo", 120.0, "Initial tempo in BPM")
-	enableExternalSync = flag.Bool("enable-external-sync", false, "Enable external clock sync (GPIO clock controls Link)")
-	cuiMode           = flag.Bool("cui", false, "Enable console UI mode with real-time stats display")
-	oledMode          = flag.Bool("oled", false, "Enable OLED display with encoder interface")
-	realtimeMode      = flag.Bool("rt", false, "Enable real-time process priority (requires appropriate permissions)")
-	configFile        = flag.String("config", "", "GPIO pin configuration file (JSON)")
-	dryRun           = flag.Bool("dry-run", false, "Simulate GPIO operations without hardware access")
+	initialTempo      = flag.Float64("tempo", 120.0, "Initial tempo in BPM (60-200)")
+	enableExternalSync = flag.Bool("enable-external-sync", false, "Enable external clock sync mode (external GPIO clock controls Link tempo)")
+	cuiMode           = flag.Bool("cui", false, "Enable console text UI with real-time monitoring and keyboard controls")
+	oledMode          = flag.Bool("oled", false, "Enable OLED display (SSD1306 128x64) with rotary encoder interface")
+	realtimeMode      = flag.Bool("rt", false, "Enable real-time process priority for low-latency operation (requires privileges)")
+	configFile        = flag.String("config", "", "Load custom GPIO pin configuration from JSON file")
+	dryRun           = flag.Bool("dry-run", false, "Simulate GPIO operations without hardware access (for testing)")
+	showHelp         = flag.Bool("help", false, "Show detailed usage information and examples")
 )
 
 // EurorackLinkBridge provides bidirectional sync between Eurorack and Ableton Link
@@ -647,8 +648,87 @@ func abs(x float64) float64 {
 	return x
 }
 
+func showUsage() {
+	fmt.Printf("Eurorack-Link Bridge with OLED Display\n")
+	fmt.Printf("======================================\n\n")
+	fmt.Printf("A bidirectional bridge between Eurorack modular synthesizers and Ableton Link,\n")
+	fmt.Printf("featuring hardware UI with OLED display and rotary encoder control.\n\n")
+	
+	fmt.Printf("USAGE:\n")
+	fmt.Printf("  ./eurorack_bridge [OPTIONS]\n\n")
+	
+	fmt.Printf("OPTIONS:\n")
+	flag.PrintDefaults()
+	
+	fmt.Printf("\nOPERATION MODES:\n")
+	fmt.Printf("  Basic Mode     : Simple GPIO bridge without UI\n")
+	fmt.Printf("  Console UI     : Text-based interface with keyboard controls (-cui)\n")
+	fmt.Printf("  OLED Mode      : Hardware interface with display and encoder (-oled)\n")
+	fmt.Printf("  External Sync  : GPIO clock controls Link tempo (-enable-external-sync)\n\n")
+	
+	fmt.Printf("EXAMPLES:\n")
+	fmt.Printf("  ./eurorack_bridge\n")
+	fmt.Printf("    Start basic bridge with default settings\n\n")
+	
+	fmt.Printf("  ./eurorack_bridge -oled -rt\n")
+	fmt.Printf("    OLED interface with real-time priority\n\n")
+	
+	fmt.Printf("  ./eurorack_bridge -cui -tempo 140\n")
+	fmt.Printf("    Console UI starting at 140 BPM\n\n")
+	
+	fmt.Printf("  ./eurorack_bridge -enable-external-sync -oled\n")
+	fmt.Printf("    External clock control with OLED display\n\n")
+	
+	fmt.Printf("  ./eurorack_bridge -dry-run -oled\n")
+	fmt.Printf("    Test OLED interface without GPIO hardware\n\n")
+	
+	fmt.Printf("  ./eurorack_bridge -config custom.json\n")
+	fmt.Printf("    Use custom GPIO pin configuration\n\n")
+	
+	fmt.Printf("HARDWARE REQUIREMENTS:\n")
+	fmt.Printf("  - Raspberry Pi with GPIO access\n")
+	fmt.Printf("  - Level shifters for Eurorack voltage compatibility\n")
+	fmt.Printf("  - For OLED mode: SSD1306 128x64 display (I2C)\n")
+	fmt.Printf("  - For OLED mode: Rotary encoder with button\n")
+	fmt.Printf("  - Optional: Hardware buttons for Back/Enter\n\n")
+	
+	fmt.Printf("GPIO PINS (BCM numbering):\n")
+	fmt.Printf("  Inputs : Clock=%d, Start=%d, Stop=%d, Reset=%d\n", 
+		defaultPins.ClockIn, defaultPins.StartIn, defaultPins.StopIn, defaultPins.ResetIn)
+	fmt.Printf("  Outputs: 1PPQ=%d, 2PPQ=%d, 4PPQ=%d, 24PPQ=%d\n",
+		defaultPins.Clock1PPQN, defaultPins.Clock2PPQN, defaultPins.Clock4PPQN, defaultPins.Clock24PPQN)
+	fmt.Printf("  Transport: Start=%d, Stop=%d, Reset=%d\n",
+		defaultPins.StartOut, defaultPins.StopOut, defaultPins.ResetOut)
+	fmt.Printf("  OLED I2C: SDA=GPIO2, SCL=GPIO3\n")
+	fmt.Printf("  Encoder: A=25, B=26, Button=27, Back=5, Enter=6, Custom=13\n\n")
+	
+	fmt.Printf("CONSOLE UI CONTROLS (when using -cui):\n")
+	fmt.Printf("  Space  : Toggle Link transport (play/stop)\n")
+	fmt.Printf("  R      : Send reset pulse and return to beat 0\n")
+	fmt.Printf("  H      : Show/hide help overlay\n")
+	fmt.Printf("  Q      : Quit application\n\n")
+	
+	fmt.Printf("OLED UI CONTROLS (when using -oled):\n")
+	fmt.Printf("  Rotary Encoder : Navigate menus and adjust values\n")
+	fmt.Printf("  Encoder Button : Enter submenu or save changes\n")
+	fmt.Printf("  Back Button    : Return to previous menu\n")
+	fmt.Printf("  Enter Button   : Alternative to encoder button\n\n")
+	
+	fmt.Printf("CONFIGURATION:\n")
+	fmt.Printf("  Settings are saved to: ~/.eurorack-link-bridge.json\n")
+	fmt.Printf("  Custom config with: -config /path/to/config.json\n\n")
+	
+	fmt.Printf("For detailed setup instructions, see README.md and README-OLED.md\n")
+}
+
 func main() {
 	flag.Parse()
+	
+	// Show help if requested
+	if *showHelp {
+		showUsage()
+		return
+	}
 	
 	// Set real-time priority if requested
 	if *realtimeMode {

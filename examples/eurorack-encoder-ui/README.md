@@ -1,27 +1,29 @@
-# Eurorack-Link Bridge
+# Eurorack-Link Bridge with OLED Display
 
-A bridge between Eurorack modular synthesizers and Ableton Link, using Raspberry Pi GPIO for clock and transport synchronization.
+A bidirectional bridge between Eurorack modular synthesizers and Ableton Link, featuring an optional hardware UI with 128x64 OLED display and rotary encoder control. Uses Raspberry Pi GPIO for clock and transport synchronization.
 
 ## Features
 
 - **Bidirectional sync**: Link can be master or slave to external Eurorack clock
 - **Multiple clock divisions**: 1, 2, 4, and 24 PPQN outputs
 - **Transport sync**: Start, stop, and reset triggers
+- **OLED Hardware UI**: 128x64 SSD1306 display with rotary encoder interface
+- **Custom clock output**: Configurable dividers (1/32 to 24 PPQN) with dedicated GPIO output
+- **Real-time controls**: Adjust tempo, view peers, monitor status via hardware interface
+- **Console UI**: Optional text-based interface with keyboard controls
 - **Real-time performance**: Optional real-time priority for precise timing
-- **Console UI**: Live monitoring of GPIO activity and Link session
 - **Eurorack compatible**: 5V tolerant inputs, proper trigger pulse widths
+- **Static builds**: Self-contained binaries for easy deployment
 
 ## GPIO Pin Configuration
 
 ### Default Pin Assignment (BCM numbering)
 
-**Inputs:**
-- GPIO 2 (SDA): External clock input
-- GPIO 3 (SCL): Start trigger input  
+**Eurorack I/O:**
+- GPIO 2: External clock input (conflicts with I2C - see note below)
+- GPIO 3: Start trigger input (conflicts with I2C - see note below)
 - GPIO 4: Stop trigger input
 - GPIO 17: Reset trigger input
-
-**Outputs:**
 - GPIO 18 (PWM0): 1 PPQN clock output
 - GPIO 19 (PWM1): 2 PPQN clock output
 - GPIO 20: 4 PPQN clock output
@@ -29,6 +31,22 @@ A bridge between Eurorack modular synthesizers and Ableton Link, using Raspberry
 - GPIO 22: Start trigger output
 - GPIO 23: Stop trigger output
 - GPIO 24: Reset trigger output
+
+**OLED Display (I2C):**
+- GPIO 2 (SDA): I2C data line for OLED
+- GPIO 3 (SCL): I2C clock line for OLED
+
+**Encoder & Controls:**
+- GPIO 25: Rotary encoder A pin
+- GPIO 26: Rotary encoder B pin
+- GPIO 27: Rotary encoder button
+- GPIO 5: Back button
+- GPIO 6: Enter button
+- GPIO 13: Custom clock output (configurable divider)
+
+> **Note**: GPIO 2 and 3 are shared between I2C (for OLED) and Eurorack inputs. 
+> When using OLED mode, these pins cannot be used for external clock/start inputs.
+> Consider using GPIO 4 and 17 for essential triggers, or use a custom pin configuration.
 
 ### Hardware Requirements
 
@@ -52,23 +70,29 @@ A bridge between Eurorack modular synthesizers and Ableton Link, using Raspberry
 ### Basic Operation
 
 ```bash
-# Start with default settings
+# Start basic bridge (no UI)
 ./eurorack_bridge
 
-# Enable external sync mode (Eurorack controls Link)
-./eurorack_bridge -enable-external-sync
+# OLED display with encoder interface
+./eurorack_bridge -oled
 
-# Start with custom tempo
-./eurorack_bridge -tempo 140
-
-# Enable console UI for monitoring
+# Console text UI with keyboard controls
 ./eurorack_bridge -cui
 
-# Enable real-time priority (requires privileges)
-./eurorack_bridge -rt
+# OLED mode with real-time priority
+./eurorack_bridge -oled -rt
 
-# Dry run mode (simulate without GPIO hardware)
-./eurorack_bridge -dry-run -cui
+# External sync mode (GPIO clock controls Link)
+./eurorack_bridge -enable-external-sync -oled
+
+# Custom initial tempo
+./eurorack_bridge -tempo 140 -oled
+
+# Test without GPIO hardware
+./eurorack_bridge -dry-run -oled
+
+# Show detailed help
+./eurorack_bridge -help
 ```
 
 ### Configuration
@@ -155,28 +179,45 @@ sudo usermod -a -G audio $USER
 ### Build
 
 ```bash
+# Quick build
 go build -o eurorack_bridge .
+
+# Static build (recommended for deployment)
+./build.sh
+
+# Manual static build
+CGO_ENABLED=0 go build -a -ldflags '-extldflags "-static"' -o eurorack_bridge .
 ```
+
+The build script automatically detects Raspberry Pi architecture and creates static binaries for better portability.
 
 ### Running as Service
 
 Create a systemd service for automatic startup:
 
 ```ini
+# /etc/systemd/system/eurorack-link.service
 [Unit]
-Description=Eurorack Link Bridge
+Description=Eurorack Link Bridge with OLED
 After=network.target
 
 [Service]
 Type=simple
 User=pi
 WorkingDirectory=/home/pi/eurorack-link
-ExecStart=/home/pi/eurorack-link/eurorack_bridge -rt
+ExecStart=/home/pi/eurorack-link/eurorack_bridge -oled -rt
 Restart=always
 RestartSec=5
 
 [Install]
 WantedBy=multi-user.target
+```
+
+Enable and start the service:
+```bash
+sudo systemctl enable eurorack-link
+sudo systemctl start eurorack-link
+sudo systemctl status eurorack-link
 ```
 
 ## Safety Notes
@@ -210,10 +251,35 @@ groups $USER
 ```
 
 ### Clock Timing Issues
-- Use `--rt` flag for better timing precision
+- Use `-rt` flag for better timing precision
 - Check system load and background processes
 - Verify stable power supply
 - Consider using external hardware clock source
+
+### OLED Display Issues
+```bash
+# Enable I2C interface
+sudo raspi-config
+# Interface Options → I2C → Enable
+
+# Check I2C devices
+i2cdetect -y 1
+
+# Verify OLED connection (should show device at 0x3C or 0x3D)
+# Common addresses: 0x3C (60), 0x3D (61)
+
+# Test with verbose logging
+./eurorack_bridge -oled -dry-run
+
+# Check I2C permissions
+ls -la /dev/i2c-*
+```
+
+The OLED initialization includes enhanced debugging that will:
+- Try multiple I2C bus numbers automatically
+- Scan for available I2C devices
+- Report detailed error information
+- Test multiple common SSD1306 addresses
 
 ## Hardware Interface Examples
 
