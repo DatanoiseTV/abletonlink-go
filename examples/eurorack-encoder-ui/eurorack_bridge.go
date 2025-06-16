@@ -458,11 +458,20 @@ func (b *EurorackLinkBridge) handleExternalReset(timestamp time.Time) {
 	b.sendPulse("reset")
 }
 
-// runClockOutput generates clock outputs by directly setting GPIO states from Link phase
+// runClockOutput generates clock pulses for various divisions (based on MIDI bridge approach)
 func (b *EurorackLinkBridge) runClockOutput() {
-	// High-frequency timer for precise GPIO state updates
+	// Use high-precision timer for clock generation (like MIDI bridge)
 	ticker := time.NewTicker(time.Millisecond) // 1ms resolution
 	defer ticker.Stop()
+	
+	// Clock state for each output (like MIDI bridge nextClockBeat)
+	const masterClockQuantum = 1.0 / 24.0 // 24 PPQN quantum (like MIDI)
+	
+	// Next scheduled beat for each clock division
+	var nextClock1Beat float64  = 0  // 1 PPQN - every 1.0 beat
+	var nextClock2Beat float64  = 0  // 2 PPQN - every 0.5 beat  
+	var nextClock4Beat float64  = 0  // 4 PPQN - every 0.25 beat
+	var nextClock24Beat float64 = 0  // 24 PPQN - every 1/24 beat
 	
 	for {
 		select {
@@ -472,73 +481,41 @@ func (b *EurorackLinkBridge) runClockOutput() {
 			b.link.CaptureAppSessionState(b.state)
 			
 			if !b.state.IsPlaying() {
-				// Set all clocks low when stopped
-				b.setClockState("clock1", 0)
-				b.setClockState("clock2", 0)
-				b.setClockState("clock4", 0)
-				b.setClockState("clock24", 0)
 				continue
 			}
 			
 			currentTime := b.link.ClockMicros()
 			
-			// Get Ableton Link's beat phase (0.0 to 1.0 per beat)
-			beatPhase := b.state.PhaseAtTime(currentTime, 4.0) // 4/4 quantum
+			// Get current beat position with master clock quantum (like MIDI bridge)
+			currentBeat := b.state.BeatAtTime(currentTime, masterClockQuantum)
 			
-			// Convert to 24 PPQN phase (0.0 to 24.0 per beat)
-			phase24 := (beatPhase * 24.0)
+			// Check each clock division independently (like MIDI bridge approach)
 			
-			// Generate clock states based on phase modulo
-			// Each clock is high for 50% of its cycle (square wave)
-			
-			// 1 PPQN - high for first half of beat
-			clock1State := 0
-			if (beatPhase < 0.5) {
-				clock1State = 1
+			// 1 PPQN - every 1.0 beat
+			if currentBeat >= nextClock1Beat {
+				b.sendSynchronizedPulse("clock1", currentTime)
+				nextClock1Beat += 1.0 // Next pulse in 1 beat
 			}
 			
-			// 2 PPQN - high for first half of each half-beat  
-			phase2 := (beatPhase * 2.0)
-			clock2State := 0
-			if ((phase2 - float64(int(phase2))) < 0.5) {
-				clock2State = 1
+			// 2 PPQN - every 0.5 beat
+			if currentBeat >= nextClock2Beat {
+				b.sendSynchronizedPulse("clock2", currentTime)
+				nextClock2Beat += 0.5 // Next pulse in 0.5 beat
 			}
 			
-			// 4 PPQN - high for first half of each quarter-beat
-			phase4 := (beatPhase * 4.0)
-			clock4State := 0
-			if ((phase4 - float64(int(phase4))) < 0.5) {
-				clock4State = 1
+			// 4 PPQN - every 0.25 beat
+			if currentBeat >= nextClock4Beat {
+				b.sendSynchronizedPulse("clock4", currentTime)
+				nextClock4Beat += 0.25 // Next pulse in 0.25 beat
 			}
 			
-			// 24 PPQN - high for first half of each 24th
-			clock24State := 0
-			if ((phase24 - float64(int(phase24))) < 0.5) {
-				clock24State = 1
+			// 24 PPQN - every 1/24 beat (like MIDI clock)
+			if currentBeat >= nextClock24Beat {
+				b.sendSynchronizedPulse("clock24", currentTime)
+				nextClock24Beat += masterClockQuantum // Next pulse in 1/24 beat
 			}
-			
-			// Set GPIO states directly
-			b.setClockState("clock1", clock1State)
-			b.setClockState("clock2", clock2State) 
-			b.setClockState("clock4", clock4State)
-			b.setClockState("clock24", clock24State)
 		}
 	}
-}
-
-// setClockState sets the GPIO state directly (0 or 1)
-func (b *EurorackLinkBridge) setClockState(output string, state int) {
-	if b.dryRun {
-		return
-	}
-	
-	line, exists := b.outputLines[output]
-	if !exists {
-		return
-	}
-	
-	// Set GPIO state directly
-	line.SetValue(state)
 }
 
 // sendSynchronizedPulse sends a pulse with phase offset and swing applied (simplified)
