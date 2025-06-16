@@ -8,6 +8,9 @@ import (
 	"time"
 
 	"github.com/warthog618/go-gpiocdev"
+	"golang.org/x/image/font"
+	"golang.org/x/image/font/basicfont"
+	"golang.org/x/image/math/fixed"
 	"periph.io/x/conn/v3/i2c"
 	"periph.io/x/conn/v3/i2c/i2creg"
 	"periph.io/x/devices/v3/ssd1306"
@@ -951,156 +954,121 @@ func (o *OLEDDisplay) drawSettingsMenu32() {
 func (o *OLEDDisplay) testDisplay() {
 	o.bridge.logInfo("Testing display with pattern...")
 	
-	// Fill with a simple pattern
+	// Simple border test
+	white := color.RGBA{255, 255, 255, 255}
+	
+	// Draw border
+	for x := 0; x < o.displayWidth; x++ {
+		o.img.Set(x, 0, white)                       // Top
+		o.img.Set(x, o.displayHeight-1, white)      // Bottom
+	}
 	for y := 0; y < o.displayHeight; y++ {
-		for x := 0; x < o.displayWidth; x++ {
-			var pixel color.RGBA
-			if (x+y)%8 < 4 {
-				pixel = color.RGBA{255, 255, 255, 255} // White
-			} else {
-				pixel = color.RGBA{0, 0, 0, 255} // Black
-			}
-			o.img.Set(x, y, pixel)
+		o.img.Set(0, y, white)                       // Left
+		o.img.Set(o.displayWidth-1, y, white)       // Right
+	}
+	
+	// Draw center cross
+	centerX := o.displayWidth / 2
+	centerY := o.displayHeight / 2
+	for i := -4; i <= 4; i++ {
+		if centerX+i >= 0 && centerX+i < o.displayWidth {
+			o.img.Set(centerX+i, centerY, white)
+		}
+		if centerY+i >= 0 && centerY+i < o.displayHeight {
+			o.img.Set(centerX, centerY+i, white)
 		}
 	}
 	
 	// Update display with test pattern
 	o.display.Draw(o.img.Bounds(), o.img, image.Point{})
 	
-	// Wait 2 seconds to show the pattern
-	time.Sleep(2 * time.Second)
+	// Wait 1 second to show the pattern
+	time.Sleep(1 * time.Second)
 	
 	o.bridge.logInfo("Test pattern complete, starting normal operation...")
 }
 
-// drawText draws text at the specified position
-func (o *OLEDDisplay) drawText(x, y int, text string, selected bool) {
-	// Simple bitmap font rendering using basic pixel drawing
-	if selected {
-		text = "> " + text
-	}
-	
-	// Draw simple 5x7 characters (very basic implementation)
-	charWidth := 6
-	charHeight := 8
-	
-	for i, char := range text {
-		charX := x + i*charWidth
-		if charX >= o.displayWidth {
-			break // Don't draw off screen
+// Simple UI drawing functions using basic shapes and patterns
+func (o *OLEDDisplay) fillRect(x, y, width, height int, color color.RGBA) {
+	for py := y; py < y+height && py < o.displayHeight; py++ {
+		for px := x; px < x+width && px < o.displayWidth; px++ {
+			if px >= 0 && py >= 0 {
+				o.img.Set(px, py, color)
+			}
 		}
-		
-		o.drawChar(charX, y, char, selected)
 	}
 }
 
-// drawChar draws a single character using a simple bitmap font
-func (o *OLEDDisplay) drawChar(x, y int, char rune, selected bool) {
-	// Very simple 5x7 bitmap font - just a few essential characters
-	var pattern [][]bool
-	
-	switch char {
-	case ' ':
-		pattern = [][]bool{{false, false, false, false, false}} // Space
-	case '>':
-		pattern = [][]bool{
-			{false, true, false, false, false},
-			{false, false, true, false, false},
-			{false, false, false, true, false},
-			{false, false, true, false, false},
-			{false, true, false, false, false},
-		}
-	case 'E':
-		pattern = [][]bool{
-			{true, true, true, true, true},
-			{true, false, false, false, false},
-			{true, true, true, false, false},
-			{true, false, false, false, false},
-			{true, true, true, true, true},
-		}
-	case 'U':
-		pattern = [][]bool{
-			{true, false, false, false, true},
-			{true, false, false, false, true},
-			{true, false, false, false, true},
-			{true, false, false, false, true},
-			{false, true, true, true, false},
-		}
-	case 'R':
-		pattern = [][]bool{
-			{true, true, true, true, false},
-			{true, false, false, false, true},
-			{true, true, true, true, false},
-			{true, false, true, false, false},
-			{true, false, false, true, false},
-		}
-	case 'O':
-		pattern = [][]bool{
-			{false, true, true, true, false},
-			{true, false, false, false, true},
-			{true, false, false, false, true},
-			{true, false, false, false, true},
-			{false, true, true, true, false},
-		}
-	case 'A':
-		pattern = [][]bool{
-			{false, true, true, true, false},
-			{true, false, false, false, true},
-			{true, true, true, true, true},
-			{true, false, false, false, true},
-			{true, false, false, false, true},
-		}
-	case 'C':
-		pattern = [][]bool{
-			{false, true, true, true, false},
-			{true, false, false, false, false},
-			{true, false, false, false, false},
-			{true, false, false, false, false},
-			{false, true, true, true, false},
-		}
-	case 'K':
-		pattern = [][]bool{
-			{true, false, false, false, true},
-			{true, false, false, true, false},
-			{true, true, true, false, false},
-			{true, false, false, true, false},
-			{true, false, false, false, true},
-		}
-	default:
-		// Default pattern for unknown characters - a simple rectangle
-		pattern = [][]bool{
-			{true, true, true, true, true},
-			{true, false, false, false, true},
-			{true, false, false, false, true},
-			{true, false, false, false, true},
-			{true, true, true, true, true},
-		}
-	}
-	
-	// Draw the character pattern
-	pixelColor := color.RGBA{255, 255, 255, 255} // White
-	if selected {
-		// Invert colors for selected text
-		for py := 0; py < len(pattern) && y+py < o.displayHeight; py++ {
-			for px := 0; px < len(pattern[py]) && x+px < o.displayWidth; px++ {
-				if pattern[py][px] {
-					o.img.Set(x+px, y+py, color.RGBA{0, 0, 0, 255}) // Black on white background
-				} else {
-					o.img.Set(x+px, y+py, color.RGBA{255, 255, 255, 255}) // White background
-				}
-			}
-		}
-	} else {
-		// Normal colors
-		for py := 0; py < len(pattern) && y+py < o.displayHeight; py++ {
-			for px := 0; px < len(pattern[py]) && x+px < o.displayWidth; px++ {
-				if pattern[py][px] {
-					o.img.Set(x+px, y+py, pixelColor)
-				}
-			}
+func (o *OLEDDisplay) drawHLine(x, y, width int, color color.RGBA) {
+	for px := x; px < x+width && px < o.displayWidth; px++ {
+		if px >= 0 && y >= 0 && y < o.displayHeight {
+			o.img.Set(px, y, color)
 		}
 	}
 }
+
+func (o *OLEDDisplay) drawVLine(x, y, height int, color color.RGBA) {
+	for py := y; py < y+height && py < o.displayHeight; py++ {
+		if x >= 0 && py >= 0 && x < o.displayWidth {
+			o.img.Set(x, py, color)
+		}
+	}
+}
+
+// Professional text rendering using proper bitmap fonts
+func (o *OLEDDisplay) drawText(x, y int, text string, selected bool) {
+	white := color.RGBA{255, 255, 255, 255}
+	black := color.RGBA{0, 0, 0, 255}
+	
+	// Choose appropriate font based on display size
+	var face font.Face
+	var lineHeight int
+	
+	if o.is32Display {
+		// Use smaller font for 32px displays
+		face = basicfont.Face7x13
+		lineHeight = 13
+	} else {
+		// Use larger font for 64px displays  
+		face = basicfont.Face7x13
+		lineHeight = 13
+	}
+	
+	// Calculate text dimensions
+	textBounds, _ := font.BoundString(face, text)
+	textWidth := int(textBounds.Max.X-textBounds.Min.X) >> 6  // Convert from fixed.Int26_6
+	textHeight := int(textBounds.Max.Y-textBounds.Min.Y) >> 6
+	
+	if selected {
+		// Draw selection background
+		bgPadding := 2
+		if o.is32Display {
+			// Full width selection for 32px displays
+			o.fillRect(0, y-bgPadding, o.displayWidth, lineHeight+bgPadding, white)
+		} else {
+			// Fitted selection for 64px displays
+			o.fillRect(x-bgPadding, y-bgPadding, textWidth+2*bgPadding, lineHeight+bgPadding, white)
+		}
+		
+		// Draw text in black on white background
+		o.drawStringWithFont(x, y+lineHeight-2, text, face, black)
+	} else {
+		// Normal white text on black background
+		o.drawStringWithFont(x, y+lineHeight-2, text, face, white)
+	}
+}
+
+// Draw string using the specified font face
+func (o *OLEDDisplay) drawStringWithFont(x, y int, text string, face font.Face, textColor color.RGBA) {
+	drawer := &font.Drawer{
+		Dst:  o.img,
+		Src:  &image.Uniform{textColor},
+		Face: face,
+		Dot:  fixed.Point26_6{X: fixed.I(x), Y: fixed.I(y)},
+	}
+	drawer.DrawString(text)
+}
+
 
 // Stop shuts down the OLED display
 func (o *OLEDDisplay) Stop() {
