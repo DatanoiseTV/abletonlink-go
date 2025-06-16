@@ -247,14 +247,7 @@ func (b *EurorackLinkBridge) Start() error {
 
 // initGPIO initializes GPIO lines for inputs and outputs
 func (b *EurorackLinkBridge) initGPIO() error {
-	// Open GPIO chip (usually gpiochip0 on Raspberry Pi)
-	chip, err := gpiocdev.NewChip("gpiochip0")
-	if err != nil {
-		return fmt.Errorf("failed to open GPIO chip: %v", err)
-	}
-	b.chip = chip
-	
-	// Configure input lines with pull-down resistors
+	// Configure input lines with event handlers
 	inputConfigs := map[string]int{
 		"clock": b.pins.ClockIn,
 		"start": b.pins.StartIn,
@@ -263,7 +256,28 @@ func (b *EurorackLinkBridge) initGPIO() error {
 	}
 	
 	for name, pin := range inputConfigs {
-		line, err := chip.RequestLine(pin, gpiocdev.AsInput, gpiocdev.WithPullDown)
+		// Create event handler for this input
+		eventHandler := func(inputName string) func(gpiocdev.LineEvent) {
+			return func(evt gpiocdev.LineEvent) {
+				if evt.Type == gpiocdev.LineEventRisingEdge {
+					// Use the high-precision hardware timestamp from the event
+					timestamp := time.Now()
+					if evt.Timestamp > 0 {
+						// evt.Timestamp is in nanoseconds since boot
+						// Convert to actual time - this gives us hardware-level precision
+						bootTime := time.Now().Add(-time.Duration(evt.Timestamp))
+						timestamp = bootTime.Add(time.Duration(evt.Timestamp))
+					}
+					b.handleInputTrigger(inputName, timestamp)
+				}
+			}
+		}(name)
+		
+		// Request line with rising edge detection and event handler
+		line, err := gpiocdev.RequestLine("gpiochip0", pin,
+			gpiocdev.WithPullDown,
+			gpiocdev.WithRisingEdge,
+			gpiocdev.WithEventHandler(eventHandler))
 		if err != nil {
 			return fmt.Errorf("failed to configure input pin %d (%s): %v", pin, name, err)
 		}
@@ -271,7 +285,13 @@ func (b *EurorackLinkBridge) initGPIO() error {
 		b.logInfo("Configured GPIO %d as input: %s", pin, name)
 	}
 	
-	// Configure output lines
+	// Configure output lines using the chip interface
+	chip, err := gpiocdev.NewChip("gpiochip0")
+	if err != nil {
+		return fmt.Errorf("failed to open GPIO chip: %v", err)
+	}
+	b.chip = chip
+	
 	outputConfigs := map[string]int{
 		"clock1":  b.pins.Clock1PPQN,
 		"clock2":  b.pins.Clock2PPQN,
@@ -294,25 +314,11 @@ func (b *EurorackLinkBridge) initGPIO() error {
 	return nil
 }
 
-// monitorInputs watches GPIO inputs for external clock and transport signals
+// monitorInputs is no longer needed - event handlers are set up in initGPIO
 func (b *EurorackLinkBridge) monitorInputs() {
-	// Set up edge detection for all input lines
-	for name, line := range b.inputLines {
-		go func(inputName string, inputLine *gpiocdev.Line) {
-			// Configure edge detection
-			eh := gpiocdev.NewLineEventHandler(func(evt gpiocdev.LineEvent) {
-				if evt.Type == gpiocdev.LineEventRisingEdge {
-					b.handleInputTrigger(inputName, evt.Timestamp)
-				}
-			})
-			
-			// Start monitoring
-			inputLine.Reconfigure(gpiocdev.AsInput, gpiocdev.WithPullDown, gpiocdev.WithEventHandler(eh))
-			
-			// Keep monitoring until context is done
-			<-b.ctx.Done()
-		}(name, line)
-	}
+	// Event handlers are already configured in initGPIO
+	// This function just waits for the context to be done
+	<-b.ctx.Done()
 }
 
 // handleInputTrigger processes GPIO input triggers
@@ -488,10 +494,15 @@ func (b *EurorackLinkBridge) sendPulse(output string) {
 		line.SetValue(0)
 	}()
 	
-	// Track pulse timing
+	// Track pulse timing for TUI display
 	b.mu.Lock()
 	b.lastPulses[output] = time.Now()
 	b.mu.Unlock()
+	
+	// Log clock pulses for debugging (only for non-24PPQN to avoid spam)
+	if output != "clock24" {
+		b.logInfo("GPIO pulse: %s", output)
+	}
 }
 
 // Stop gracefully shuts down the bridge
