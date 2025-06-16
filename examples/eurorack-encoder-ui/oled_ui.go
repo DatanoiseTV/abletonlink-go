@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/warthog618/go-gpiocdev"
+	"periph.io/x/conn/v3/i2c"
 	"periph.io/x/conn/v3/i2c/i2creg"
 	"periph.io/x/devices/v3/ssd1306"
 	"periph.io/x/host/v3"
@@ -95,24 +96,72 @@ type OLEDDisplay struct {
 
 // NewOLEDDisplay creates a new OLED display interface
 func NewOLEDDisplay(bridge *EurorackLinkBridge) (*OLEDDisplay, error) {
+	bridge.logInfo("Initializing OLED display...")
+	
 	// Initialize periph.io
-	if _, err := host.Init(); err != nil {
+	bridge.logInfo("Initializing periph.io host...")
+	state, err := host.Init()
+	if err != nil {
 		return nil, fmt.Errorf("failed to initialize periph.io: %v", err)
 	}
+	bridge.logInfo("Periph.io initialized successfully. Loaded drivers: %d, skipped: %d, failed: %d", 
+		len(state.Loaded), len(state.Skipped), len(state.Failed))
 	
-	// Open I2C bus
-	bus, err := i2creg.Open("")
-	if err != nil {
-		return nil, fmt.Errorf("failed to open I2C bus: %v", err)
+	// List failed drivers for debugging
+	if len(state.Failed) > 0 {
+		bridge.logInfo("Failed drivers:")
+		for _, failure := range state.Failed {
+			bridge.logInfo("  %s: %v", failure.D, failure.Err)
+		}
 	}
 	
-	// Initialize SSD1306 OLED display
-	display, err := ssd1306.NewI2C(bus, &ssd1306.Opts{
-		W: 128,
-		H: 64,
-	})
-	if err != nil {
-		return nil, fmt.Errorf("failed to initialize OLED display: %v", err)
+	// Open I2C bus - try different bus numbers
+	var bus i2creg.BusCloser
+	busNumbers := []string{"", "1", "0"} // Default, then specific bus numbers
+	
+	for _, busNum := range busNumbers {
+		bridge.logInfo("Trying to open I2C bus: %s", busNum)
+		bus, err = i2creg.Open(busNum)
+		if err == nil {
+			bridge.logInfo("I2C bus opened successfully: %s (bus %s)", bus, busNum)
+			break
+		} else {
+			bridge.logInfo("Failed to open I2C bus %s: %v", busNum, err)
+		}
+	}
+	
+	if bus == nil {
+		return nil, fmt.Errorf("failed to open any I2C bus. Last error: %v", err)
+	}
+	
+	// Scan I2C bus for devices
+	bridge.logInfo("Scanning I2C bus for devices...")
+	scanI2CBus(bridge, bus)
+	
+	// Try different I2C addresses (0x3C and 0x3D are common for SSD1306)
+	addresses := []uint16{0x3C, 0x3D}
+	var display *ssd1306.Dev
+	
+	for _, addr := range addresses {
+		bridge.logInfo("Trying SSD1306 at I2C address 0x%02X...", addr)
+		
+		// Initialize SSD1306 OLED display with specific address
+		display, err = ssd1306.NewI2C(bus, &ssd1306.Opts{
+			W:       128,
+			H:       64,
+			Rotated: false,
+		})
+		
+		if err == nil {
+			bridge.logInfo("SSD1306 initialized successfully at address 0x%02X", addr)
+			break
+		} else {
+			bridge.logInfo("Failed to initialize SSD1306 at address 0x%02X: %v", addr, err)
+		}
+	}
+	
+	if display == nil {
+		return nil, fmt.Errorf("failed to initialize OLED display at any address (tried: 0x3C, 0x3D). Last error: %v", err)
 	}
 	
 	// Create display buffer
@@ -564,5 +613,29 @@ func (o *OLEDDisplay) Stop() {
 	// Close GPIO lines
 	for _, line := range o.encoderLines {
 		line.Close()
+	}
+}
+
+// scanI2CBus scans the I2C bus for available devices
+func scanI2CBus(bridge *EurorackLinkBridge, bus i2creg.BusCloser) {
+	bridge.logInfo("Starting I2C bus scan...")
+	
+	foundDevices := 0
+	for addr := 0x03; addr <= 0x77; addr++ {
+		// Try to create a device handle at this address
+		devHandle := &i2c.Dev{Bus: bus, Addr: uint16(addr)}
+		
+		// Try to read a single byte to test if device responds
+		testBuf := make([]byte, 1)
+		if err := devHandle.Tx(nil, testBuf); err == nil {
+			bridge.logInfo("Found I2C device at address 0x%02X", addr)
+			foundDevices++
+		}
+	}
+	
+	if foundDevices == 0 {
+		bridge.logInfo("No I2C devices found on bus")
+	} else {
+		bridge.logInfo("Scan complete: found %d I2C device(s)", foundDevices)
 	}
 }
