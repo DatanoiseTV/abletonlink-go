@@ -79,7 +79,7 @@ var clockOutputs = []string{
 // OLEDDisplay manages the OLED display and encoder interface
 type OLEDDisplay struct {
 	bridge    *EurorackLinkBridge
-	display   *goi2coled.Oled
+	display   *goi2coled.I2c
 	pins      EncoderPins
 	
 	// Encoder state
@@ -135,7 +135,7 @@ func NewOLEDDisplay(bridge *EurorackLinkBridge) (*OLEDDisplay, error) {
 	// Try different I2C addresses and buses
 	busNumbers := []int{1, 0} // Try bus 1 first, then bus 0
 	addresses := []int{0x3C, 0x3D}
-	var display *goi2coled.Oled
+	var display *goi2coled.I2c
 	var err error
 	
 	for _, bus := range busNumbers {
@@ -143,7 +143,8 @@ func NewOLEDDisplay(bridge *EurorackLinkBridge) (*OLEDDisplay, error) {
 			bridge.logInfo("Trying SSD1306 at I2C bus %d, address 0x%02X...", bus, addr)
 			
 			// Initialize SSD1306 OLED display with go-i2c-oled library
-			display, err = goi2coled.NewI2c(bus, addr, displayWidth, displayHeight)
+			// NewI2c(vccState, height, width, address, bus)
+			display, err = goi2coled.NewI2c(1, displayHeight, displayWidth, addr, bus)
 			if err == nil {
 				bridge.logInfo("SSD1306 %dx%d initialized successfully at bus %d, address 0x%02X", displayWidth, displayHeight, bus, addr)
 				break
@@ -998,7 +999,6 @@ func (o *OLEDDisplay) drawText(x, y int, text string, selected bool) {
 	// Calculate text dimensions
 	textBounds, _ := font.BoundString(face, text)
 	textWidth := int(textBounds.Max.X-textBounds.Min.X) >> 6  // Convert from fixed.Int26_6
-	textHeight := int(textBounds.Max.Y-textBounds.Min.Y) >> 6
 	
 	if selected {
 		// Draw selection background
