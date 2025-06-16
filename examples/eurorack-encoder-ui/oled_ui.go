@@ -84,6 +84,21 @@ type EncoderEvent struct {
 	Value     int    // rotation direction: +1 or -1, buttons: 1 for press
 }
 
+// ButtonState tracks button press timing for debouncing and long press detection
+type ButtonState struct {
+	lastPress   time.Time
+	lastRelease time.Time
+	isPressed   bool
+	longPressed bool
+}
+
+const (
+	// Encoder timing constants
+	encoderDebounceTime = 2 * time.Millisecond
+	buttonDebounceTime  = 50 * time.Millisecond
+	longPressTime      = 800 * time.Millisecond
+)
+
 // OLEDDisplay manages the OLED display and encoder interface
 type OLEDDisplay struct {
 	bridge    *EurorackLinkBridge
