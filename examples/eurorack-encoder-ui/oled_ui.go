@@ -78,6 +78,12 @@ var clockOutputs = []string{
 	"clock24", // 24 PPQN
 }
 
+// EncoderEvent represents an encoder input event
+type EncoderEvent struct {
+	EventType string // "rotation", "button", "back", "enter"
+	Value     int    // rotation direction: +1 or -1, buttons: 1 for press
+}
+
 // OLEDDisplay manages the OLED display and encoder interface
 type OLEDDisplay struct {
 	bridge    *EurorackLinkBridge
