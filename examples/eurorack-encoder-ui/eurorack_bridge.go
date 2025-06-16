@@ -92,6 +92,10 @@ type EurorackLinkBridge struct {
 	pins        GPIOPins
 	dryRun      bool
 	
+	// Input debouncing
+	lastInputTime map[string]time.Time
+	inputMutex    sync.RWMutex
+	
 	// Synchronization state
 	mu                  sync.RWMutex
 	lastLinkTempo      float64
@@ -179,6 +183,7 @@ func NewEurorackLinkBridge(tempo float64, externalSync bool, uiEnabled bool, ole
 		configPath:          filepath.Join(os.ExpandEnv("$HOME"), ".eurorack-link-bridge.json"),
 		inputLines:          make(map[string]*gpiocdev.Line),
 		outputLines:         make(map[string]*gpiocdev.Line),
+		lastInputTime:       make(map[string]time.Time),
 		phaseOffsets:        make(map[string]float64),
 		swingAmounts:        make(map[string]float64),
 	}
@@ -304,10 +309,10 @@ func (b *EurorackLinkBridge) initGPIO() error {
 			}
 		}(name)
 		
-		// Request line with rising edge detection and event handler
+		// Request line with pull-up and rising edge detection (Eurorack compatible)
 		line, err := gpiocdev.RequestLine("gpiochip0", pin,
-			gpiocdev.WithPullDown,
-			gpiocdev.WithRisingEdge,
+			gpiocdev.WithPullUp,    // Pull-up for Eurorack compatibility
+			gpiocdev.WithRisingEdge, // Trigger on rising edge (positive triggers)
 			gpiocdev.WithEventHandler(eventHandler))
 		if err != nil {
 			return fmt.Errorf("failed to configure input pin %d (%s): %v", pin, name, err)
@@ -352,8 +357,21 @@ func (b *EurorackLinkBridge) monitorInputs() {
 	<-b.ctx.Done()
 }
 
-// handleInputTrigger processes GPIO input triggers
+// handleInputTrigger processes GPIO input triggers with debouncing
 func (b *EurorackLinkBridge) handleInputTrigger(input string, timestamp time.Time) {
+	// Debounce input signals
+	const debounceTime = 50 * time.Millisecond // 50ms debounce for external triggers
+	
+	b.inputMutex.Lock()
+	lastTime, exists := b.lastInputTime[input]
+	if exists && timestamp.Sub(lastTime) < debounceTime {
+		b.inputMutex.Unlock()
+		return // Too soon, ignore this trigger
+	}
+	b.lastInputTime[input] = timestamp
+	b.inputMutex.Unlock()
+	
+	// Process debounced input
 	switch input {
 	case "clock":
 		if b.externalSyncEnabled {
