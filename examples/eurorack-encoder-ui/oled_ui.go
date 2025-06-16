@@ -3,6 +3,7 @@ package main
 import (
 	"fmt"
 	"image"
+	"image/color"
 	"image/draw"
 	"time"
 
@@ -582,8 +583,8 @@ func (o *OLEDDisplay) sendCustomPulse() {
 
 // updateDisplay refreshes the OLED display
 func (o *OLEDDisplay) updateDisplay() {
-	// Clear display
-	draw.Draw(o.img, o.bounds, &image.Uniform{}, image.Point{}, draw.Src)
+	// Clear display (fill with black)
+	draw.Draw(o.img, o.bounds, &image.Uniform{color.RGBA{0, 0, 0, 255}}, image.Point{}, draw.Src)
 	
 	// Draw current menu
 	switch o.currentMenu {
@@ -965,8 +966,8 @@ func (o *OLEDDisplay) Stop() {
 	}
 	close(o.stopUpdate)
 	
-	// Clear display
-	draw.Draw(o.img, o.bounds, &image.Uniform{}, image.Point{}, draw.Src)
+	// Clear display (fill with black)
+	draw.Draw(o.img, o.bounds, &image.Uniform{color.RGBA{0, 0, 0, 255}}, image.Point{}, draw.Src)
 	o.display.Draw(o.img.Bounds(), o.img, image.Point{})
 	
 	// Close GPIO lines
