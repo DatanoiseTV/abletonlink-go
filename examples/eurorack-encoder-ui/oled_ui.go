@@ -9,6 +9,7 @@ import (
 
 	"github.com/warthog618/go-gpiocdev"
 	"github.com/waxdred/go-i2c-oled"
+	"github.com/waxdred/go-i2c-oled/ssd1306"
 	"golang.org/x/image/font"
 	"golang.org/x/image/font/basicfont"
 	"golang.org/x/image/math/fixed"
@@ -144,7 +145,7 @@ func NewOLEDDisplay(bridge *EurorackLinkBridge) (*OLEDDisplay, error) {
 			
 			// Initialize SSD1306 OLED display with go-i2c-oled library
 			// NewI2c(vccState, height, width, address, bus)
-			display, err = goi2coled.NewI2c(1, displayHeight, displayWidth, addr, bus)
+			display, err = goi2coled.NewI2c(ssd1306.SSD1306_SWITCHCAPVCC, displayHeight, displayWidth, addr, bus)
 			if err == nil {
 				bridge.logInfo("SSD1306 %dx%d initialized successfully at bus %d, address 0x%02X", displayWidth, displayHeight, bus, addr)
 				break
@@ -161,9 +162,9 @@ func NewOLEDDisplay(bridge *EurorackLinkBridge) (*OLEDDisplay, error) {
 		return nil, fmt.Errorf("failed to initialize OLED display at any bus/address. Last error: %v", err)
 	}
 	
-	// Create display buffer
-	bounds := image.Rect(0, 0, displayWidth, displayHeight)
-	img := image.NewRGBA(bounds)
+	// Use the display's built-in image buffer
+	bounds := display.Img.Bounds()
+	img := display.Img
 	
 	oled := &OLEDDisplay{
 		bridge:        bridge,
@@ -549,8 +550,8 @@ func (o *OLEDDisplay) sendCustomPulse() {
 
 // updateDisplay refreshes the OLED display
 func (o *OLEDDisplay) updateDisplay() {
-	// Clear display (fill with black)
-	draw.Draw(o.img, o.bounds, &image.Uniform{color.RGBA{0, 0, 0, 255}}, image.Point{}, draw.Src)
+	// Clear display buffer (fill with black)
+	draw.Draw(o.img, o.img.Bounds(), &image.Uniform{color.RGBA{0, 0, 0, 255}}, image.Point{}, draw.Src)
 	
 	// Draw current menu
 	switch o.currentMenu {
@@ -573,8 +574,11 @@ func (o *OLEDDisplay) updateDisplay() {
 	}
 	
 	// Update display - send buffer to hardware using go-i2c-oled API
-	o.display.DrawImage(o.img)
-	o.display.Display()
+	o.display.Draw()
+	err := o.display.Display()
+	if err != nil {
+		o.bridge.logInfo("Display update error: %v", err)
+	}
 }
 
 // drawMainMenu draws the main menu
@@ -941,8 +945,11 @@ func (o *OLEDDisplay) testDisplay() {
 	}
 	
 	// Update display with test pattern
-	o.display.DrawImage(o.img)
-	o.display.Display()
+	o.display.Draw()
+	err := o.display.Display()
+	if err != nil {
+		o.bridge.logInfo("Test pattern display error: %v", err)
+	}
 	
 	// Wait 1 second to show the pattern
 	time.Sleep(1 * time.Second)
@@ -1038,8 +1045,10 @@ func (o *OLEDDisplay) Stop() {
 	}
 	close(o.stopUpdate)
 	
-	// Clear display
-	o.display.Clear()
+	// Clear display buffer and display
+	draw.Draw(o.img, o.img.Bounds(), &image.Uniform{color.RGBA{0, 0, 0, 255}}, image.Point{}, draw.Src)
+	o.display.Draw()
+	o.display.Display()
 	
 	// Close GPIO lines
 	for _, line := range o.encoderLines {
