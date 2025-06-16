@@ -5,6 +5,7 @@ import (
 	"image"
 	"image/color"
 	"image/draw"
+	"sync"
 	"time"
 
 	"github.com/warthog618/go-gpiocdev"
@@ -746,7 +747,7 @@ func (o *OLEDDisplay) drawTempoMenu32() {
 		tempo := int(o.bridge.lastLinkTempo)
 		// Show current tempo and link status
 		o.drawText(0, 0, fmt.Sprintf("Tempo: %d BPM", tempo), false)
-		peers := len(o.bridge.link.GetPeers())
+		peers := int(o.bridge.link.NumPeers())
 		o.drawText(0, 10, fmt.Sprintf("Peers: %d", peers), false)
 		o.drawText(0, 22, "Press=edit", false)
 	}
