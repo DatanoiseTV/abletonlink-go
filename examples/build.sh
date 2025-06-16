@@ -24,6 +24,6 @@ echo "rtmidi found: $(pkg-config --modversion rtmidi)"
 
 # Build the example
 echo "Building..."
-go build -o midi_bridge midi_bridge.go
+go build -o midi_bridge .
 
 echo "Build complete! Run with: ./midi_bridge"

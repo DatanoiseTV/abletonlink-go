@@ -43,6 +43,7 @@ var (
 	initialTempo      = flag.Float64("tempo", 120.0, "Initial tempo in BPM")
 	enableExternalSync = flag.Bool("enable-external-sync", false, "Enable external MIDI clock/transport sync (MIDI controls Link)")
 	cuiMode           = flag.Bool("cui", false, "Enable console UI mode with real-time stats display")
+	realtimeMode      = flag.Bool("rt", false, "Enable real-time process priority (requires appropriate permissions)")
 )
 
 // MIDILinkBridge provides bidirectional sync between MIDI clock and Ableton Link
@@ -1149,6 +1150,17 @@ func listAvailablePorts() {
 
 func main() {
 	flag.Parse()
+
+	// Set real-time priority if requested
+	if *realtimeMode {
+		if err := setRealtimePriority(); err != nil {
+			fmt.Fprintf(os.Stderr, "Warning: Failed to set real-time priority: %v\n", err)
+			fmt.Fprintf(os.Stderr, "Continuing with normal priority...\n\n")
+		} else {
+			fmt.Fprintf(os.Stderr, "Real-time priority enabled successfully.\n")
+			logRealtimePriorityInfo()
+		}
+	}
 
 	// Handle port listing
 	if *listPorts {
