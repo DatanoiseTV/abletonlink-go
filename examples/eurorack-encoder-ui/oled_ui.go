@@ -4,12 +4,9 @@ import (
 	"fmt"
 	"image"
 	"image/draw"
-	"strconv"
-	"strings"
 	"time"
 
 	"github.com/warthog618/go-gpiocdev"
-	"periph.io/x/conn/v3/i2c"
 	"periph.io/x/conn/v3/i2c/i2creg"
 	"periph.io/x/devices/v3/ssd1306"
 	"periph.io/x/host/v3"
@@ -164,24 +161,24 @@ func (o *OLEDDisplay) initEncoder() error {
 			}
 		}(name)
 		
-		// Request line with pull-up and both edge detection
-		var opts []gpiocdev.LineConfigOption
+		// Request line with appropriate configuration
+		var line *gpiocdev.Line
+		var err error
+		
 		if name == "encoderA" || name == "encoderB" {
-			opts = []gpiocdev.LineConfigOption{
+			// Encoder pins: pull-up with both edge detection
+			line, err = gpiocdev.RequestLine("gpiochip0", pin,
 				gpiocdev.WithPullUp,
 				gpiocdev.WithBothEdges,
-				gpiocdev.WithEventHandler(eventHandler),
-			}
+				gpiocdev.WithEventHandler(eventHandler))
 		} else {
 			// Buttons: pull-up with falling edge (button press)
-			opts = []gpiocdev.LineConfigOption{
+			line, err = gpiocdev.RequestLine("gpiochip0", pin,
 				gpiocdev.WithPullUp,
 				gpiocdev.WithFallingEdge,
-				gpiocdev.WithEventHandler(eventHandler),
-			}
+				gpiocdev.WithEventHandler(eventHandler))
 		}
 		
-		line, err := gpiocdev.RequestLine("gpiochip0", pin, opts...)
 		if err != nil {
 			return fmt.Errorf("failed to configure encoder pin %d (%s): %v", pin, name, err)
 		}
@@ -220,11 +217,8 @@ func (o *OLEDDisplay) handleEncoderEvent(input string, evt gpiocdev.LineEvent) {
 
 // handleRotaryEncoder processes rotary encoder rotation
 func (o *OLEDDisplay) handleRotaryEncoder(input string, evt gpiocdev.LineEvent) {
-	// Read current state of both encoder pins
-	lineA := o.encoderLines["encoderA"]
+	// Read current state of encoder B pin
 	lineB := o.encoderLines["encoderB"]
-	
-	stateA, _ := lineA.Value()
 	stateB, _ := lineB.Value()
 	
 	// Detect rotation direction using quadrature encoding
