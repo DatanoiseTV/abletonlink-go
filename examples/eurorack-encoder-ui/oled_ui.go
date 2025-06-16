@@ -8,13 +8,10 @@ import (
 	"time"
 
 	"github.com/warthog618/go-gpiocdev"
+	"github.com/waxdred/go-i2c-oled"
 	"golang.org/x/image/font"
 	"golang.org/x/image/font/basicfont"
 	"golang.org/x/image/math/fixed"
-	"periph.io/x/conn/v3/i2c"
-	"periph.io/x/conn/v3/i2c/i2creg"
-	"periph.io/x/devices/v3/ssd1306"
-	"periph.io/x/host/v3"
 )
 
 // Additional GPIO pins for encoder UI
@@ -82,7 +79,7 @@ var clockOutputs = []string{
 // OLEDDisplay manages the OLED display and encoder interface
 type OLEDDisplay struct {
 	bridge    *EurorackLinkBridge
-	display   *ssd1306.Dev
+	display   *goi2coled.Oled
 	pins      EncoderPins
 	
 	// Encoder state
@@ -122,50 +119,6 @@ type OLEDDisplay struct {
 func NewOLEDDisplay(bridge *EurorackLinkBridge) (*OLEDDisplay, error) {
 	bridge.logInfo("Initializing OLED display...")
 	
-	// Initialize periph.io
-	bridge.logInfo("Initializing periph.io host...")
-	state, err := host.Init()
-	if err != nil {
-		return nil, fmt.Errorf("failed to initialize periph.io: %v", err)
-	}
-	bridge.logInfo("Periph.io initialized successfully. Loaded drivers: %d, skipped: %d, failed: %d", 
-		len(state.Loaded), len(state.Skipped), len(state.Failed))
-	
-	// List failed drivers for debugging
-	if len(state.Failed) > 0 {
-		bridge.logInfo("Failed drivers:")
-		for _, failure := range state.Failed {
-			bridge.logInfo("  %s: %v", failure.D, failure.Err)
-		}
-	}
-	
-	// Open I2C bus - try different bus numbers
-	var bus i2c.BusCloser
-	busNumbers := []string{"", "1", "0"} // Default, then specific bus numbers
-	
-	for _, busNum := range busNumbers {
-		bridge.logInfo("Trying to open I2C bus: %s", busNum)
-		bus, err = i2creg.Open(busNum)
-		if err == nil {
-			bridge.logInfo("I2C bus opened successfully: %s (bus %s)", bus, busNum)
-			break
-		} else {
-			bridge.logInfo("Failed to open I2C bus %s: %v", busNum, err)
-		}
-	}
-	
-	if bus == nil {
-		return nil, fmt.Errorf("failed to open any I2C bus. Last error: %v", err)
-	}
-	
-	// Scan I2C bus for devices
-	bridge.logInfo("Scanning I2C bus for devices...")
-	scanI2CBus(bridge, bus)
-	
-	// Try different I2C addresses (0x3C and 0x3D are common for SSD1306)
-	addresses := []uint16{0x3C, 0x3D}
-	var display *ssd1306.Dev
-	
 	// Determine display dimensions based on mode
 	displayWidth := 128
 	displayHeight := 64
@@ -179,30 +132,36 @@ func NewOLEDDisplay(bridge *EurorackLinkBridge) (*OLEDDisplay, error) {
 		bridge.logInfo("Configuring for 128x64 display")
 	}
 	
-	for _, addr := range addresses {
-		bridge.logInfo("Trying SSD1306 at I2C address 0x%02X...", addr)
-		
-		// Initialize SSD1306 OLED display with specific address and dimensions
-		display, err = ssd1306.NewI2C(bus, &ssd1306.Opts{
-			W:       displayWidth,
-			H:       displayHeight,
-			Rotated: false,
-		})
-		
-		if err == nil {
-			bridge.logInfo("SSD1306 %dx%d initialized successfully at address 0x%02X", displayWidth, displayHeight, addr)
+	// Try different I2C addresses and buses
+	busNumbers := []int{1, 0} // Try bus 1 first, then bus 0
+	addresses := []int{0x3C, 0x3D}
+	var display *goi2coled.Oled
+	var err error
+	
+	for _, bus := range busNumbers {
+		for _, addr := range addresses {
+			bridge.logInfo("Trying SSD1306 at I2C bus %d, address 0x%02X...", bus, addr)
+			
+			// Initialize SSD1306 OLED display with go-i2c-oled library
+			display, err = goi2coled.NewI2c(bus, addr, displayWidth, displayHeight)
+			if err == nil {
+				bridge.logInfo("SSD1306 %dx%d initialized successfully at bus %d, address 0x%02X", displayWidth, displayHeight, bus, addr)
+				break
+			} else {
+				bridge.logInfo("Failed to initialize SSD1306 at bus %d, address 0x%02X: %v", bus, addr, err)
+			}
+		}
+		if display != nil {
 			break
-		} else {
-			bridge.logInfo("Failed to initialize SSD1306 at address 0x%02X: %v", addr, err)
 		}
 	}
 	
 	if display == nil {
-		return nil, fmt.Errorf("failed to initialize OLED display at any address (tried: 0x3C, 0x3D). Last error: %v", err)
+		return nil, fmt.Errorf("failed to initialize OLED display at any bus/address. Last error: %v", err)
 	}
 	
 	// Create display buffer
-	bounds := display.Bounds()
+	bounds := image.Rect(0, 0, displayWidth, displayHeight)
 	img := image.NewRGBA(bounds)
 	
 	oled := &OLEDDisplay{
@@ -612,8 +571,9 @@ func (o *OLEDDisplay) updateDisplay() {
 		o.drawSettingsMenu()
 	}
 	
-	// Update display
-	o.display.Draw(o.img.Bounds(), o.img, image.Point{})
+	// Update display - send buffer to hardware using go-i2c-oled API
+	o.display.DrawImage(o.img)
+	o.display.Display()
 }
 
 // drawMainMenu draws the main menu
@@ -980,7 +940,8 @@ func (o *OLEDDisplay) testDisplay() {
 	}
 	
 	// Update display with test pattern
-	o.display.Draw(o.img.Bounds(), o.img, image.Point{})
+	o.display.DrawImage(o.img)
+	o.display.Display()
 	
 	// Wait 1 second to show the pattern
 	time.Sleep(1 * time.Second)
@@ -1077,9 +1038,8 @@ func (o *OLEDDisplay) Stop() {
 	}
 	close(o.stopUpdate)
 	
-	// Clear display (fill with black)
-	draw.Draw(o.img, o.bounds, &image.Uniform{color.RGBA{0, 0, 0, 255}}, image.Point{}, draw.Src)
-	o.display.Draw(o.img.Bounds(), o.img, image.Point{})
+	// Clear display
+	o.display.Clear()
 	
 	// Close GPIO lines
 	for _, line := range o.encoderLines {
@@ -1087,26 +1047,3 @@ func (o *OLEDDisplay) Stop() {
 	}
 }
 
-// scanI2CBus scans the I2C bus for available devices
-func scanI2CBus(bridge *EurorackLinkBridge, bus i2c.BusCloser) {
-	bridge.logInfo("Starting I2C bus scan...")
-	
-	foundDevices := 0
-	for addr := 0x03; addr <= 0x77; addr++ {
-		// Try to create a device handle at this address
-		devHandle := &i2c.Dev{Bus: bus, Addr: uint16(addr)}
-		
-		// Try to read a single byte to test if device responds
-		testBuf := make([]byte, 1)
-		if err := devHandle.Tx(nil, testBuf); err == nil {
-			bridge.logInfo("Found I2C device at address 0x%02X", addr)
-			foundDevices++
-		}
-	}
-	
-	if foundDevices == 0 {
-		bridge.logInfo("No I2C devices found on bus")
-	} else {
-		bridge.logInfo("Scan complete: found %d I2C device(s)", foundDevices)
-	}
-}

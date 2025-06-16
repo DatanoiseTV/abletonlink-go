@@ -1,6 +1,6 @@
 module eurorack-encoder-ui
 
-go 1.21
+go 1.24.0
 
 require (
 	github.com/DatanoiseTV/abletonlink-go v0.0.0
@@ -8,9 +8,8 @@ require (
 	github.com/rivo/tview v0.0.0-20250501113434-0c592cd31026
 	github.com/sirupsen/logrus v1.9.3
 	github.com/warthog618/go-gpiocdev v0.9.0
-	periph.io/x/conn/v3 v3.7.0
-	periph.io/x/devices/v3 v3.7.1
-	periph.io/x/host/v3 v3.8.2
+	github.com/waxdred/go-i2c-oled v1.0.1
+	golang.org/x/image v0.23.0
 )
 
 require (
