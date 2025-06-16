@@ -6,16 +6,14 @@ set -e
 
 echo "Building Eurorack-Link Bridge with OLED UI..."
 
-# Static build flags for better portability
-BUILD_FLAGS="-a -ldflags '-extldflags \"-static\"'"
-
 # Check if we're on a Raspberry Pi
 if [[ $(uname -m) == "arm"* ]] || [[ $(uname -m) == "aarch64" ]]; then
-    echo "Detected ARM architecture - building static binary for Raspberry Pi"
-    CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -a -ldflags '-extldflags "-static"' -o eurorack_bridge .
+    echo "Detected ARM architecture - building for Raspberry Pi"
+    # Note: Cannot use CGO_ENABLED=0 because abletonlink-go requires CGO for C++ Link library
+    GOOS=linux GOARCH=arm64 go build -o eurorack_bridge .
 else
-    echo "Building static binary for current architecture (dry-run mode available)"
-    CGO_ENABLED=0 go build -a -ldflags '-extldflags "-static"' -o eurorack_bridge .
+    echo "Building for current architecture (dry-run mode available)"
+    go build -o eurorack_bridge .
 fi
 
 echo "Build complete! Run with: ./eurorack_bridge"

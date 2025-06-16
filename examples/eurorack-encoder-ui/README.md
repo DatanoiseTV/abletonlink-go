@@ -182,14 +182,14 @@ sudo usermod -a -G audio $USER
 # Quick build
 go build -o eurorack_bridge .
 
-# Static build (recommended for deployment)
+# Use build script (recommended)
 ./build.sh
 
-# Manual static build
-CGO_ENABLED=0 go build -a -ldflags '-extldflags "-static"' -o eurorack_bridge .
+# Cross-compile for Raspberry Pi from another machine
+GOOS=linux GOARCH=arm64 go build -o eurorack_bridge .
 ```
 
-The build script automatically detects Raspberry Pi architecture and creates static binaries for better portability.
+The build script automatically detects Raspberry Pi architecture. Note that static builds are not possible due to the CGO dependency on the Ableton Link C++ library.
 
 ### Running as Service
 
