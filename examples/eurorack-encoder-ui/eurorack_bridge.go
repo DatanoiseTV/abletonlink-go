@@ -479,39 +479,92 @@ func (b *EurorackLinkBridge) runClockOutput() {
 			
 			currentTime := b.link.ClockMicros()
 			
-			// Generate pulses for each output with phase offset and swing
-			b.generateClockPulse("clock1", 1.0, currentTime, &lastBeat1)
-			b.generateClockPulse("clock2", 0.5, currentTime, &lastBeat2)
-			b.generateClockPulse("clock4", 0.25, currentTime, &lastBeat4)
-			b.generateClockPulse("clock24", 1.0/24.0, currentTime, &lastBeat24)
+			// All clocks derive from the same master beat position
+			// Use the finest division (24 PPQN) as the master timebase
+			masterBeat := b.state.BeatAtTime(currentTime, 1.0/24.0)
+			
+			// Generate pulses for each output with proper dividers
+			b.generateClockPulseFromMaster("clock1", masterBeat, 24, currentTime, &lastBeat1)   // 1 PPQN = every 24 ticks
+			b.generateClockPulseFromMaster("clock2", masterBeat, 12, currentTime, &lastBeat2)   // 2 PPQN = every 12 ticks  
+			b.generateClockPulseFromMaster("clock4", masterBeat, 6, currentTime, &lastBeat4)    // 4 PPQN = every 6 ticks
+			b.generateClockPulseFromMaster("clock24", masterBeat, 1, currentTime, &lastBeat24)  // 24 PPQN = every 1 tick
 		}
 	}
 }
 
-// generateClockPulse generates a clock pulse with phase offset and swing
-func (b *EurorackLinkBridge) generateClockPulse(output string, quantum float64, currentTime int64, lastBeat *float64) {
+// generateClockPulseFromMaster generates a clock pulse from master timebase with divider
+func (b *EurorackLinkBridge) generateClockPulseFromMaster(output string, masterBeat float64, divider int, currentTime int64, lastBeat *float64) {
 	// Get phase offset and swing amount for this output
 	phaseOffset := b.getPhaseOffset(output)
 	swingAmount := b.getSwingAmount(output)
 	
-	// Calculate beat position with phase offset
-	beat := b.state.BeatAtTime(currentTime, quantum)
+	// Apply phase offset to master beat (0.0-1.0 represents 0-360° of a tick)
+	offsetMasterBeat := masterBeat + phaseOffset
 	
-	// Apply phase offset (0.0-1.0 represents 0-360° of a beat)
-	offsetBeat := beat + phaseOffset/quantum
+	// Calculate divided clock position
+	dividedBeat := offsetMasterBeat / float64(divider)
+	lastDividedBeat := *lastBeat / float64(divider)
 	
-	// Check if we crossed a beat boundary
-	if int(offsetBeat) > int(*lastBeat + phaseOffset/quantum) {
+	// Check if we crossed a divided beat boundary
+	if int(dividedBeat) > int(lastDividedBeat) {
 		// Calculate timing adjustment for swing
 		var timingOffset int64 = 0
 		
 		if swingAmount > 0.0 {
 			// Apply swing by delaying every other pulse
-			beatNumber := int(offsetBeat)
-			if beatNumber%2 == 1 { // Odd beats get delayed
-				// Swing delay is a percentage of the beat interval
-				beatInterval := 60_000_000 / (b.lastLinkTempo * quantum) // microseconds per beat
-				maxDelay := beatInterval / 2 // Maximum delay is half a beat
+			pulseNumber := int(dividedBeat)
+			if pulseNumber%2 == 1 { // Odd pulses get delayed
+				// Swing delay is a percentage of the divided beat interval
+				tickInterval := 60_000_000 / (b.lastLinkTempo * 24.0) // microseconds per 24PPQN tick
+				dividedInterval := tickInterval * float64(divider)      // microseconds per divided beat
+				maxDelay := dividedInterval / 2                         // Maximum delay is half a divided beat
+				timingOffset = int64(maxDelay * swingAmount)
+			}
+		}
+		
+		if timingOffset > 0 {
+			// Schedule delayed pulse
+			go func() {
+				time.Sleep(time.Duration(timingOffset) * time.Microsecond)
+				b.sendPulse(output)
+			}()
+		} else {
+			// Send pulse immediately
+			b.sendPulse(output)
+		}
+	}
+	
+	*lastBeat = offsetMasterBeat
+}
+
+// generateClockPulse generates a clock pulse with phase offset and swing (deprecated - kept for compatibility)
+func (b *EurorackLinkBridge) generateClockPulse(output string, quantum float64, currentTime int64, lastBeat *float64) {
+	// Get phase offset and swing amount for this output
+	phaseOffset := b.getPhaseOffset(output)
+	swingAmount := b.getSwingAmount(output)
+	
+	// Calculate beat position for this quantum division
+	// Use quantum as the beat grid for proper division timing
+	beat := b.state.BeatAtTime(currentTime, quantum)
+	
+	// Apply phase offset (0.0-1.0 represents 0-360° of a quantum)
+	offsetBeat := beat + phaseOffset
+	
+	// Check if we crossed a quantum boundary (not just integer beat)
+	quantumPosition := offsetBeat / quantum
+	lastQuantumPosition := *lastBeat / quantum
+	
+	if int(quantumPosition) > int(lastQuantumPosition) {
+		// Calculate timing adjustment for swing
+		var timingOffset int64 = 0
+		
+		if swingAmount > 0.0 {
+			// Apply swing by delaying every other pulse
+			pulseNumber := int(quantumPosition)
+			if pulseNumber%2 == 1 { // Odd pulses get delayed
+				// Swing delay is a percentage of the quantum interval
+				quantumInterval := 60_000_000 / (b.lastLinkTempo / quantum) // microseconds per quantum
+				maxDelay := quantumInterval / 2 // Maximum delay is half a quantum
 				timingOffset = int64(float64(maxDelay) * swingAmount)
 			}
 		}
@@ -552,15 +605,18 @@ func (b *EurorackLinkBridge) sendPulse(output string) {
 		line.SetValue(0)
 	}()
 	
-	// Track pulse timing for TUI display
-	b.mu.Lock()
-	b.lastPulses[output] = time.Now()
-	b.mu.Unlock()
+	// Track pulse timing for TUI display (non-blocking)
+	go func() {
+		b.mu.Lock()
+		b.lastPulses[output] = time.Now()
+		b.mu.Unlock()
+	}()
 	
-	// Log clock pulses for debugging (only for non-24PPQN to avoid spam)
-	if output != "clock24" {
-		b.logInfo("GPIO pulse: %s", output)
-	}
+	// Disable debug logging for clock pulses to prevent timing interference
+	// Debug logging can be re-enabled for troubleshooting if needed
+	// if output != "clock24" {
+	// 	b.logInfo("GPIO pulse: %s", output)
+	// }
 }
 
 // Stop gracefully shuts down the bridge
