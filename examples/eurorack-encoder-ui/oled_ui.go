@@ -95,6 +95,12 @@ type OLEDDisplay struct {
 	encoderStateA int
 	encoderStateB int
 	encoderPosition int
+	lastEncoderState int // For quadrature decoding
+	encoderDebounce time.Time
+	
+	// Button debouncing and long press detection
+	buttonStates map[string]ButtonState
+	buttonMutex sync.RWMutex
 	
 	// Menu state
 	currentMenu     MenuState
@@ -199,6 +205,7 @@ func NewOLEDDisplay(bridge *EurorackLinkBridge) (*OLEDDisplay, error) {
 		needsUpdate:   true, // Initial update needed
 		encoderEvents: make(chan EncoderEvent, 20), // Buffered for fast response
 		stopEncoder:   make(chan bool),
+		buttonStates:  make(map[string]ButtonState),
 	}
 	
 	// Initialize encoder GPIO
@@ -246,10 +253,10 @@ func (o *OLEDDisplay) initEncoder() error {
 				gpiocdev.WithBothEdges,
 				gpiocdev.WithEventHandler(eventHandler))
 		} else {
-			// Buttons: pull-up with falling edge (button press)
+			// Buttons: pull-up with both edges for press/release detection
 			line, err = gpiocdev.RequestLine("gpiochip0", pin,
 				gpiocdev.WithPullUp,
-				gpiocdev.WithFallingEdge,
+				gpiocdev.WithBothEdges,
 				gpiocdev.WithEventHandler(eventHandler))
 		}
 		
@@ -271,31 +278,18 @@ func (o *OLEDDisplay) initEncoder() error {
 
 // handleEncoderEvent processes encoder and button events (fast interrupt handler)
 func (o *OLEDDisplay) handleEncoderEvent(input string, evt gpiocdev.LineEvent) {
+	now := time.Now()
+	
 	// Fast interrupt handler - just queue events
 	switch input {
 	case "encoderA", "encoderB":
-		o.handleRotaryEncoder(input, evt)
+		o.handleRotaryEncoder(input, evt, now)
 	case "encoderBtn":
-		if evt.Type == gpiocdev.LineEventFallingEdge {
-			select {
-			case o.encoderEvents <- EncoderEvent{EventType: "button", Value: 1}:
-			default: // Don't block if channel is full
-			}
-		}
+		o.handleButtonEvent("encoderBtn", evt, now)
 	case "backBtn":
-		if evt.Type == gpiocdev.LineEventFallingEdge {
-			select {
-			case o.encoderEvents <- EncoderEvent{EventType: "back", Value: 1}:
-			default:
-			}
-		}
+		o.handleButtonEvent("backBtn", evt, now)
 	case "enterBtn":
-		if evt.Type == gpiocdev.LineEventFallingEdge {
-			select {
-			case o.encoderEvents <- EncoderEvent{EventType: "enter", Value: 1}:
-			default:
-			}
-		}
+		o.handleButtonEvent("enterBtn", evt, now)
 	}
 }
 
@@ -318,26 +312,117 @@ func (o *OLEDDisplay) processEncoderEvent(event EncoderEvent) {
 	}
 }
 
-// handleRotaryEncoder processes rotary encoder rotation (fast interrupt)
-func (o *OLEDDisplay) handleRotaryEncoder(input string, evt gpiocdev.LineEvent) {
-	// Read current state of encoder B pin
+// handleRotaryEncoder processes rotary encoder rotation with improved quadrature decoding
+func (o *OLEDDisplay) handleRotaryEncoder(input string, evt gpiocdev.LineEvent, now time.Time) {
+	// Debounce encoder to prevent noise
+	if now.Sub(o.encoderDebounce) < encoderDebounceTime {
+		return
+	}
+	
+	// Read current state of both encoder pins
+	lineA := o.encoderLines["encoderA"]
 	lineB := o.encoderLines["encoderB"]
+	stateA, _ := lineA.Value()
 	stateB, _ := lineB.Value()
 	
-	// Detect rotation direction using quadrature encoding
-	if input == "encoderA" && evt.Type == gpiocdev.LineEventFallingEdge {
-		var direction int
-		if stateB == 1 {
-			direction = 1
-		} else {
-			direction = -1
+	// Combine states into a 2-bit value for quadrature decoding
+	currentState := (stateA << 1) | stateB
+	
+	// Quadrature state transition table for proper half-step support\n\t// Forward:  00 -> 01 -> 11 -> 10 -> 00\n\t// Backward: 00 -> 10 -> 11 -> 01 -> 00\n\tvar direction int\n\tswitch (o.lastEncoderState << 2) | currentState {\n\tcase 0x01, 0x07, 0x08, 0x0E: // Forward transitions\n\t\tdirection = 1\n\tcase 0x02, 0x04, 0x0B, 0x0D: // Backward transitions\n\t\tdirection = -1\n\tdefault:\n\t\t// Invalid transition or no change\n\t\to.lastEncoderState = currentState\n\t\treturn\n\t}\n\t\n\to.lastEncoderState = currentState\n\to.encoderDebounce = now\n\t\n\t// Queue rotation event for fast processing\n\tselect {\n\tcase o.encoderEvents <- EncoderEvent{EventType: \"rotation\", Value: direction}:\n\tdefault: // Don't block if channel is full\n\t}\n}"}
+
+// handleButtonEvent processes button press/release with debouncing and long press detection
+func (o *OLEDDisplay) handleButtonEvent(buttonName string, evt gpiocdev.LineEvent, now time.Time) {
+	o.buttonMutex.Lock()
+	defer o.buttonMutex.Unlock()
+	
+	state, exists := o.buttonStates[buttonName]
+	if !exists {
+		state = ButtonState{}
+		o.buttonStates[buttonName] = state
+	}
+	
+	if evt.Type == gpiocdev.LineEventFallingEdge {
+		// Button pressed
+		if now.Sub(state.lastPress) < buttonDebounceTime {
+			return // Debounce
 		}
 		
-		// Queue rotation event for fast processing
-		select {
-		case o.encoderEvents <- EncoderEvent{EventType: "rotation", Value: direction}:
-		default: // Don't block if channel is full
+		state.lastPress = now
+		state.isPressed = true
+		state.longPressed = false
+		o.buttonStates[buttonName] = state
+		
+		// Start long press timer for encoder button
+		if buttonName == "encoderBtn" {
+			go o.handleLongPress(buttonName, now)
 		}
+		
+	} else if evt.Type == gpiocdev.LineEventRisingEdge {
+		// Button released
+		if !state.isPressed || now.Sub(state.lastRelease) < buttonDebounceTime {
+			return // Debounce or wasn't pressed
+		}
+		
+		state.lastRelease = now
+		state.isPressed = false
+		pressDuration := now.Sub(state.lastPress)
+		o.buttonStates[buttonName] = state
+		
+		// Handle button release based on press duration
+		if buttonName == "encoderBtn" {
+			if pressDuration >= longPressTime && !state.longPressed {
+				// Long press - act as back button
+				select {
+				case o.encoderEvents <- EncoderEvent{EventType: "back", Value: 1}:
+				default:
+				}
+			} else if pressDuration < longPressTime && !state.longPressed {
+				// Short press - act as enter button
+				select {
+				case o.encoderEvents <- EncoderEvent{EventType: "button", Value: 1}:
+				default:
+				}
+			}
+		} else {
+			// Handle other buttons normally
+			var eventType string
+			switch buttonName {
+			case "backBtn":
+				eventType = "back"
+			case "enterBtn":
+				eventType = "enter"
+			}
+			
+			if eventType != "" {
+				select {
+				case o.encoderEvents <- EncoderEvent{EventType: eventType, Value: 1}:
+				default:
+				}
+			}
+		}
+	}
+}
+
+// handleLongPress detects long press for encoder button
+func (o *OLEDDisplay) handleLongPress(buttonName string, pressTime time.Time) {
+	time.Sleep(longPressTime)
+	
+	o.buttonMutex.Lock()
+	defer o.buttonMutex.Unlock()
+	
+	state, exists := o.buttonStates[buttonName]
+	if !exists || !state.isPressed || !pressTime.Equal(state.lastPress) {
+		return // Button was released or different press
+	}
+	
+	// Mark as long pressed and trigger back action
+	state.longPressed = true
+	o.buttonStates[buttonName] = state
+	
+	// Send back event for long press
+	select {
+	case o.encoderEvents <- EncoderEvent{EventType: "back", Value: 1}:
+	default:
 	}
 }
 
