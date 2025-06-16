@@ -328,7 +328,30 @@ func (o *OLEDDisplay) handleRotaryEncoder(input string, evt gpiocdev.LineEvent, 
 	// Combine states into a 2-bit value for quadrature decoding
 	currentState := (stateA << 1) | stateB
 	
-	// Quadrature state transition table for proper half-step support\n\t// Forward:  00 -> 01 -> 11 -> 10 -> 00\n\t// Backward: 00 -> 10 -> 11 -> 01 -> 00\n\tvar direction int\n\tswitch (o.lastEncoderState << 2) | currentState {\n\tcase 0x01, 0x07, 0x08, 0x0E: // Forward transitions\n\t\tdirection = 1\n\tcase 0x02, 0x04, 0x0B, 0x0D: // Backward transitions\n\t\tdirection = -1\n\tdefault:\n\t\t// Invalid transition or no change\n\t\to.lastEncoderState = currentState\n\t\treturn\n\t}\n\t\n\to.lastEncoderState = currentState\n\to.encoderDebounce = now\n\t\n\t// Queue rotation event for fast processing\n\tselect {\n\tcase o.encoderEvents <- EncoderEvent{EventType: \"rotation\", Value: direction}:\n\tdefault: // Don't block if channel is full\n\t}\n}"}
+	// Quadrature state transition table for proper half-step support
+	// Forward:  00 -> 01 -> 11 -> 10 -> 00
+	// Backward: 00 -> 10 -> 11 -> 01 -> 00
+	var direction int
+	switch (o.lastEncoderState << 2) | currentState {
+	case 0x01, 0x07, 0x08, 0x0E: // Forward transitions
+		direction = 1
+	case 0x02, 0x04, 0x0B, 0x0D: // Backward transitions
+		direction = -1
+	default:
+		// Invalid transition or no change
+		o.lastEncoderState = currentState
+		return
+	}
+	
+	o.lastEncoderState = currentState
+	o.encoderDebounce = now
+	
+	// Queue rotation event for fast processing
+	select {
+	case o.encoderEvents <- EncoderEvent{EventType: "rotation", Value: direction}:
+	default: // Don't block if channel is full
+	}
+}
 
 // handleButtonEvent processes button press/release with debouncing and long press detection
 func (o *OLEDDisplay) handleButtonEvent(buttonName string, evt gpiocdev.LineEvent, now time.Time) {
