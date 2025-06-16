@@ -116,7 +116,7 @@ func NewOLEDDisplay(bridge *EurorackLinkBridge) (*OLEDDisplay, error) {
 	}
 	
 	// Open I2C bus - try different bus numbers
-	var bus i2creg.BusCloser
+	var bus i2c.BusCloser
 	busNumbers := []string{"", "1", "0"} // Default, then specific bus numbers
 	
 	for _, busNum := range busNumbers {
@@ -617,7 +617,7 @@ func (o *OLEDDisplay) Stop() {
 }
 
 // scanI2CBus scans the I2C bus for available devices
-func scanI2CBus(bridge *EurorackLinkBridge, bus i2creg.BusCloser) {
+func scanI2CBus(bridge *EurorackLinkBridge, bus i2c.BusCloser) {
 	bridge.logInfo("Starting I2C bus scan...")
 	
 	foundDevices := 0
