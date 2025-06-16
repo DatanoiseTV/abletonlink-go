@@ -193,8 +193,9 @@ func NewOLEDDisplay(bridge *EurorackLinkBridge) (*OLEDDisplay, error) {
 	// Test the display with a simple pattern first
 	oled.testDisplay()
 	
-	// Start update loop
+	// Start update loops
 	oled.startUpdateLoop()
+	oled.startEncoderLoop()
 	
 	return oled, nil
 }
@@ -252,27 +253,56 @@ func (o *OLEDDisplay) initEncoder() error {
 	return nil
 }
 
-// handleEncoderEvent processes encoder and button events
+// handleEncoderEvent processes encoder and button events (fast interrupt handler)
 func (o *OLEDDisplay) handleEncoderEvent(input string, evt gpiocdev.LineEvent) {
+	// Fast interrupt handler - just queue events
 	switch input {
 	case "encoderA", "encoderB":
 		o.handleRotaryEncoder(input, evt)
 	case "encoderBtn":
 		if evt.Type == gpiocdev.LineEventFallingEdge {
-			o.handleEncoderButton()
+			select {
+			case o.encoderEvents <- EncoderEvent{EventType: "button", Value: 1}:
+			default: // Don't block if channel is full
+			}
 		}
 	case "backBtn":
 		if evt.Type == gpiocdev.LineEventFallingEdge {
-			o.handleBackButton()
+			select {
+			case o.encoderEvents <- EncoderEvent{EventType: "back", Value: 1}:
+			default:
+			}
 		}
 	case "enterBtn":
 		if evt.Type == gpiocdev.LineEventFallingEdge {
-			o.handleEnterButton()
+			select {
+			case o.encoderEvents <- EncoderEvent{EventType: "enter", Value: 1}:
+			default:
+			}
 		}
 	}
 }
 
-// handleRotaryEncoder processes rotary encoder rotation
+// processEncoderEvent handles encoder events in dedicated thread
+func (o *OLEDDisplay) processEncoderEvent(event EncoderEvent) {
+	switch event.EventType {
+	case "rotation":
+		if event.Value > 0 {
+			o.encoderPosition++
+		} else {
+			o.encoderPosition--
+		}
+		o.handleEncoderRotation()
+	case "button":
+		o.handleEncoderButton()
+	case "back":
+		o.handleBackButton()
+	case "enter":
+		o.handleEnterButton()
+	}
+}
+
+// handleRotaryEncoder processes rotary encoder rotation (fast interrupt)
 func (o *OLEDDisplay) handleRotaryEncoder(input string, evt gpiocdev.LineEvent) {
 	// Read current state of encoder B pin
 	lineB := o.encoderLines["encoderB"]
@@ -280,12 +310,18 @@ func (o *OLEDDisplay) handleRotaryEncoder(input string, evt gpiocdev.LineEvent) 
 	
 	// Detect rotation direction using quadrature encoding
 	if input == "encoderA" && evt.Type == gpiocdev.LineEventFallingEdge {
+		var direction int
 		if stateB == 1 {
-			o.encoderPosition++
+			direction = 1
 		} else {
-			o.encoderPosition--
+			direction = -1
 		}
-		o.handleEncoderRotation()
+		
+		// Queue rotation event for fast processing
+		select {
+		case o.encoderEvents <- EncoderEvent{EventType: "rotation", Value: direction}:
+		default: // Don't block if channel is full
+		}
 	}
 }
 
@@ -495,15 +531,43 @@ func (b *EurorackLinkBridge) getSwingAmount(output string) float64 {
 
 // startUpdateLoop begins the display update routine
 func (o *OLEDDisplay) startUpdateLoop() {
-	o.updateTicker = time.NewTicker(100 * time.Millisecond) // 10 FPS
+	o.updateTicker = time.NewTicker(30 * time.Millisecond) // 33 FPS for smooth UI
 	
 	go func() {
 		for {
 			select {
 			case <-o.updateTicker.C:
-				o.updateDisplay()
+				// Only update display if something changed
+				o.updateMutex.RLock()
+				needsUpdate := o.needsUpdate
+				o.updateMutex.RUnlock()
+				
+				if needsUpdate {
+					o.updateDisplay()
+					o.updateMutex.Lock()
+					o.needsUpdate = false
+					o.updateMutex.Unlock()
+				}
 				o.updateCustomClock()
 			case <-o.stopUpdate:
+				return
+			}
+		}
+	}()
+}
+
+// startEncoderLoop begins the fast encoder processing routine
+func (o *OLEDDisplay) startEncoderLoop() {
+	go func() {
+		for {
+			select {
+			case event := <-o.encoderEvents:
+				o.processEncoderEvent(event)
+				// Mark display for update
+				o.updateMutex.Lock()
+				o.needsUpdate = true
+				o.updateMutex.Unlock()
+			case <-o.stopEncoder:
 				return
 			}
 		}
@@ -1046,7 +1110,10 @@ func (o *OLEDDisplay) Stop() {
 	if o.updateTicker != nil {
 		o.updateTicker.Stop()
 	}
+	
+	// Stop both update loops
 	close(o.stopUpdate)
+	close(o.stopEncoder)
 	
 	// Clear display buffer and display
 	draw.Draw(o.img, o.img.Bounds(), &image.Uniform{color.RGBA{0, 0, 0, 255}}, image.Point{}, draw.Src)
