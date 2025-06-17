@@ -292,17 +292,20 @@ func (g *Graphics) DrawFadeTransition(progress float64, oldBuffer, newBuffer *im
 	// Alpha blending between old and new content
 	alpha := uint8(progress * 255)
 	
-	for y := bounds.Min.Y; y < bounds.Max.Y; y++ {
-		for x := bounds.Min.X; x < bounds.Max.X; x++ {
-			oldR, oldG, oldB, _ := oldBuffer.At(x, y).RGBA()
-			newR, newG, newB, _ := newBuffer.At(x, y).RGBA()
-			
-			// Blend colors
-			r := uint8((oldR*(255-uint32(alpha)) + newR*uint32(alpha)) / 255 / 256)
-			g := uint8((oldG*(255-uint32(alpha)) + newG*uint32(alpha)) / 255 / 256)
-			b := uint8((newB*(255-uint32(alpha)) + newB*uint32(alpha)) / 255 / 256)
-			
-			buffer.Set(x, y, color.RGBA{r, g, b, 255})
+	// For 1bpp display, use simple transition based on progress
+	if progress > 0.5 {
+		// Show new buffer
+		for y := bounds.Min.Y; y < bounds.Max.Y; y++ {
+			for x := bounds.Min.X; x < bounds.Max.X; x++ {
+				buffer.Set(x, y, newBuffer.At(x, y))
+			}
+		}
+	} else {
+		// Show old buffer
+		for y := bounds.Min.Y; y < bounds.Max.Y; y++ {
+			for x := bounds.Min.X; x < bounds.Max.X; x++ {
+				buffer.Set(x, y, oldBuffer.At(x, y))
+			}
 		}
 	}
 	

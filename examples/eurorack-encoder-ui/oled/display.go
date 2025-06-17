@@ -10,9 +10,6 @@ import (
 
 	"github.com/waxdred/go-i2c-oled"
 	"github.com/waxdred/go-i2c-oled/ssd1306"
-	"golang.org/x/image/font"
-	"golang.org/x/image/font/basicfont"
-	"golang.org/x/image/math/fixed"
 )
 
 // DisplaySize represents the OLED dimensions
