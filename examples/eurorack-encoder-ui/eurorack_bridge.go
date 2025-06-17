@@ -15,6 +15,8 @@ import (
 	"github.com/DatanoiseTV/abletonlink-go"
 	"github.com/sirupsen/logrus"
 	"github.com/warthog618/go-gpiocdev"
+
+	"eurorack-encoder-ui/oled"
 )
 
 const (
@@ -124,11 +126,11 @@ type EurorackLinkBridge struct {
 	lastPulses map[string]time.Time // Track last pulse times for each output
 	
 	// UI components
-	tui       *EurorackTUIManager
-	oled      *OLEDDisplay
-	uiEnabled bool
-	oledMode  bool
-	oled32Mode bool
+	tui         *EurorackTUIManager
+	uiManager   *oled.UIManager
+	uiEnabled   bool
+	oledMode    bool
+	oled32Mode  bool
 	
 	// Context for shutdown
 	ctx    context.Context
@@ -255,11 +257,40 @@ func (b *EurorackLinkBridge) Start() error {
 	
 	// Create OLED display if enabled
 	if (b.oledMode || b.oled32Mode) && !b.dryRun {
-		oled, err := NewOLEDDisplay(b)
+		config := oled.DefaultConfig()
+		if b.oled32Mode {
+			config.DisplaySize = oled.Size128x32
+			b.logInfo("Initializing OLED 128x32 display...")
+		} else {
+			config.DisplaySize = oled.Size128x64
+			b.logInfo("Initializing OLED 128x64 display...")
+		}
+		
+		uiManager, err := oled.NewUIManager(config)
 		if err != nil {
 			b.logInfo("Failed to initialize OLED display: %v", err)
 		} else {
-			b.oled = oled
+			b.uiManager = uiManager
+			
+			// Set up bidirectional sync callbacks
+			uiManager.SetCallbacks(
+				func(tempo float64) {
+					b.setTempo(tempo)
+				},
+				func(output string, phase float64) {
+					b.setPhaseOffset(output, phase)
+				},
+				func(output string, swing float64) {
+					b.setSwingAmount(output, swing)
+				},
+			)
+			
+			// Start UI
+			uiManager.Start()
+			
+			// Show splash screen
+			uiManager.ShowSplashScreen(2 * time.Second)
+			
 			if b.oled32Mode {
 				b.logInfo("OLED 128x32 display initialized")
 			} else {
@@ -274,6 +305,11 @@ func (b *EurorackLinkBridge) Start() error {
 	// Start input monitoring if not in dry-run mode
 	if !b.dryRun {
 		go b.monitorInputs()
+	}
+	
+	// Start UI data update loop if OLED UI is enabled
+	if b.uiManager != nil {
+		go b.runUIUpdate()
 	}
 	
 	b.logInfo("Eurorack bridge started")
@@ -682,9 +718,9 @@ func (b *EurorackLinkBridge) Stop() {
 		b.tui.Stop()
 	}
 	
-	// Stop OLED display if enabled
-	if b.oled != nil {
-		b.oled.Stop()
+	// Stop OLED UI if enabled
+	if b.uiManager != nil {
+		b.uiManager.Stop()
 	}
 	
 	// Clean up GPIO
@@ -793,6 +829,100 @@ func (b *EurorackLinkBridge) saveConfig() {
 	
 	if err := os.WriteFile(b.configPath, data, 0644); err != nil {
 		b.logInfo("Failed to save config: %v", err)
+	}
+}
+
+// setTempo updates the Link tempo
+func (b *EurorackLinkBridge) setTempo(tempo float64) {
+	b.link.CaptureAppSessionState(b.state)
+	currentTime := b.link.ClockMicros()
+	b.state.SetTempo(tempo, currentTime)
+	b.link.CommitAppSessionState(b.state)
+	
+	b.mu.Lock()
+	b.lastLinkTempo = tempo
+	b.mu.Unlock()
+	
+	b.logInfo("Tempo set to %.1f BPM", tempo)
+}
+
+// getPhaseOffset gets the phase offset for a specific output
+func (b *EurorackLinkBridge) getPhaseOffset(output string) float64 {
+	b.mu.RLock()
+	offset, exists := b.phaseOffsets[output]
+	b.mu.RUnlock()
+	
+	if !exists {
+		return 0.0 // Default to no offset
+	}
+	return offset
+}
+
+// setPhaseOffset sets the phase offset for a specific output
+func (b *EurorackLinkBridge) setPhaseOffset(output string, offset float64) {
+	b.mu.Lock()
+	b.phaseOffsets[output] = offset
+	b.mu.Unlock()
+	
+	b.logInfo("Phase offset for %s set to %.1f° (%.3f)", output, offset*360, offset)
+	b.saveConfig() // Auto-save on change
+}
+
+// getSwingAmount gets the swing amount for a specific output
+func (b *EurorackLinkBridge) getSwingAmount(output string) float64 {
+	b.mu.RLock()
+	swing, exists := b.swingAmounts[output]
+	b.mu.RUnlock()
+	
+	if !exists {
+		return 0.0 // Default to no swing
+	}
+	return swing
+}
+
+// setSwingAmount sets the swing amount for a specific output
+func (b *EurorackLinkBridge) setSwingAmount(output string, swing float64) {
+	b.mu.Lock()
+	b.swingAmounts[output] = swing
+	b.mu.Unlock()
+	
+	b.logInfo("Swing amount for %s set to %.1f%% (%.3f)", output, swing*100, swing)
+	b.saveConfig() // Auto-save on change
+}
+
+// runUIUpdate provides regular data updates to the OLED UI
+func (b *EurorackLinkBridge) runUIUpdate() {
+	ticker := time.NewTicker(50 * time.Millisecond) // 20 FPS update rate
+	defer ticker.Stop()
+	
+	for {
+		select {
+		case <-b.ctx.Done():
+			return
+		case <-ticker.C:
+			if b.uiManager == nil {
+				continue
+			}
+			
+			// Capture current Link state
+			b.link.CaptureAppSessionState(b.state)
+			
+			// Get current data
+			b.mu.RLock()
+			tempo := b.lastLinkTempo
+			b.mu.RUnlock()
+			
+			isPlaying := b.state.IsPlaying()
+			peerCount := int(b.link.NumPeers())
+			
+			// Calculate beat phase for animations
+			currentTime := b.link.ClockMicros()
+			beat := b.state.BeatAtTime(currentTime, 1.0) // 1 beat quantum
+			beatPhase := beat - float64(int(beat))       // Fractional part
+			
+			// Update UI with current data
+			b.uiManager.UpdateData(tempo, isPlaying, peerCount, beatPhase)
+		}
 	}
 }
 
