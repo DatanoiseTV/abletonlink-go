@@ -13,10 +13,16 @@ class MixerWorklet extends AudioWorkletProcessor {
           ch = { buffer: new Float32Array(0), gain: 0.8, mute: false, solo: false };
           this.channels.set(data.id, ch);
         }
-        const newBuf = new Float32Array(ch.buffer.length + data.samples.length);
+        
+        // Convert Int16 to Float32 during append
+        const f32 = new Float32Array(data.samples.length);
+        for(let i=0; i<data.samples.length; i++) f32[i] = data.samples[i] / 32768.0;
+
+        const newBuf = new Float32Array(ch.buffer.length + f32.length);
         newBuf.set(ch.buffer);
-        newBuf.set(data.samples, ch.buffer.length);
+        newBuf.set(f32, ch.buffer.length);
         ch.buffer = newBuf;
+        
         if (ch.buffer.length > 48000 * 2) ch.buffer = ch.buffer.slice(ch.buffer.length - 48000);
       } else if (type === 'params') {
         this.masterGain = data.masterVol;
@@ -54,8 +60,6 @@ class MixerWorklet extends AudioWorkletProcessor {
       if (ch.mute || (anySolo && !ch.solo)) continue;
 
       const g = ch.gain * this.masterGain * (this.masterMute ? 0 : 1);
-      
-      // Handle stereo output safely
       const left = output[0];
       const right = output.length > 1 ? output[1] : null;
 

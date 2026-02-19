@@ -11,27 +11,17 @@
         .bpm-area { text-align: center; }
         .bpm-value { font-size: 32px; font-weight: bold; color: #f1c40f; }
         .bpm-label { font-size: 10px; color: #666; margin-top: -5px; }
-        
         .main-view { display: flex; gap: 20px; align-items: flex-start; }
         .mixer-surface { display: flex; gap: 10px; overflow-x: auto; padding-bottom: 20px; flex-grow: 1; }
-        
-        .channel-strip { 
-            background: #252525; border: 1px solid #3a3a3a; border-radius: 4px; 
-            width: 100px; padding: 15px 10px; display: flex; flex-direction: column; align-items: center; 
-            flex-shrink: 0; position: relative;
-        }
+        .channel-strip { background: #252525; border: 1px solid #3a3a3a; border-radius: 4px; width: 100px; padding: 15px 10px; display: flex; flex-direction: column; align-items: center; flex-shrink: 0; position: relative; }
         .channel-strip.master { background: #1a1a1a; border: 2px solid #555; width: 180px; }
-        
         .label-area { height: 45px; width: 100%; text-align: center; overflow: hidden; margin-bottom: 10px; border-bottom: 1px solid #333; }
         .peer-name { font-size: 8px; color: #888; text-transform: uppercase; }
         .ch-name { font-size: 10px; font-weight: bold; color: #fff; margin-top: 2px; }
-        
         .fader-section { display: flex; height: 220px; align-items: center; gap: 8px; }
         .meter-bridge { width: 8px; height: 100%; background: #000; border-radius: 1px; position: relative; overflow: hidden; border: 1px solid #222; }
         .meter-fill { position: absolute; bottom: 0; left: 0; width: 100%; height: 0%; background: linear-gradient(to top, #2ecc71 0%, #2ecc71 75%, #f1c40f 85%, #e74c3c 100%); transition: height 0.08s ease-out; }
-        
         input[type=range][orient=vertical] { writing-mode: bt-lr; -webkit-appearance: slider-vertical; width: 12px; height: 100%; padding: 0; margin: 0; cursor: pointer; }
-        
         .buttons { display: grid; grid-template-columns: 1fr 1fr; gap: 4px; width: 100%; margin-top: 15px; }
         button { background: #333; border: 1px solid #444; color: #999; padding: 6px 2px; border-radius: 3px; font-size: 9px; cursor: pointer; font-weight: bold; }
         button:hover { background: #444; color: #fff; }
@@ -40,18 +30,14 @@
         button.solo.active { background: #ffc107; color: #000; }
         button.mon.active { background: #00bcd4; color: #000; }
         button.stream.active { background: #e74c3c; color: #fff; animation: blink 1s infinite; }
-        
         .config-panel { margin-top: 15px; padding-top: 15px; border-top: 1px solid #333; width: 100%; }
         .config-panel input { background: #000; border: 1px solid #444; color: #0f0; font-family: monospace; font-size: 10px; width: 100%; box-sizing: border-box; padding: 4px; margin-bottom: 5px; }
         .config-panel label { font-size: 8px; color: #666; display: block; margin-bottom: 2px; }
-        
         #transport-btn { width: 100%; padding: 10px; font-size: 12px; margin-bottom: 10px; }
         #transport-btn.playing { background: #2ecc71; color: #000; }
-        
         .latency-control { width: 100%; margin-top: 15px; text-align: center; }
         .latency-control input[type=range] { width: 100%; -webkit-appearance: none; background: #333; height: 4px; border-radius: 2px; outline: none; }
         .latency-control input[type=range]::-webkit-slider-thumb { -webkit-appearance: none; width: 12px; height: 12px; background: #00bcd4; border-radius: 50%; cursor: pointer; }
-
         .debug-overlay { background: rgba(0,0,0,0.8); border: 1px solid #444; padding: 10px; border-radius: 4px; font-size: 9px; font-family: monospace; position: fixed; bottom: 20px; right: 20px; pointer-events: none; z-index: 100; min-width: 200px; }
         .debug-val { color: #0f0; }
         .buffer-stat { font-size: 8px; color: #666; margin-top: 5px; }
@@ -60,16 +46,9 @@
 <body>
     <div class="container">
         <header>
-            <div>
-                <div style="font-size: 18px; font-weight: bold; letter-spacing: 1px;">LINK WEB MIXER</div>
-                <div id="status" style="font-size: 9px; color: #555;">CONNECTING...</div>
-            </div>
-            <div class="bpm-area">
-                <div class="bpm-value" id="bpm">120.00</div>
-                <div class="bpm-label">BPM</div>
-            </div>
+            <div><div style="font-size: 18px; font-weight: bold; letter-spacing: 1px;">LINK WEB MIXER</div><div id="status" style="font-size: 9px; color: #555;">CONNECTING...</div></div>
+            <div class="bpm-area"><div class="bpm-value" id="bpm">120.00</div><div class="bpm-label">BPM</div></div>
         </header>
-
         <div class="main-view">
             <div class="mixer-surface" id="mixer"></div>
             <div class="channel-strip master">
@@ -88,7 +67,6 @@
             </div>
         </div>
     </div>
-
     <div class="debug-overlay" id="debug">
         <div style="font-weight:bold; border-bottom:1px solid #333; margin-bottom:5px; padding-bottom:2px;">DEBUG STATS</div>
         <div>NET IN: <span class="debug-val" id="dbg-in">0.0</span> kbps</div>
@@ -96,7 +74,6 @@
         <div>ICE OUT: <span class="debug-val" id="dbg-ice">0.0</span> kbps</div>
         <div>MIXER LOAD: <span class="debug-val" id="dbg-load">0.0</span>%</div>
     </div>
-
     <script>
         const ws = new WebSocket(`${window.location.protocol==='https:'?'wss:':'ws:'}//${window.location.host}/ws`);
         ws.binaryType = 'arraybuffer';
@@ -131,7 +108,8 @@
                     for (let i = 0; i < numBundles; i++) {
                         const id = dv.getBigUint64(offset, true).toString(); offset += 8;
                         const numSamples = dv.getUint32(offset, true); offset += 4;
-                        const samples = new Float32Array(e.data, offset, numSamples); offset += numSamples * 4;
+                        // Audio is now Int16
+                        const samples = new Int16Array(e.data, offset, numSamples); offset += numSamples * 2;
                         mixerNode.port.postMessage({ type: 'audio', data: { id, samples } });
                     }
                 } else if (type === 2) { 
@@ -166,13 +144,10 @@
             tb.classList.toggle('playing', s.playing); tb.textContent = s.playing ? 'LINK STOP' : 'LINK PLAY';
             document.getElementById('stream-btn').classList.toggle('active', s.streaming);
             document.getElementById('stream-btn').textContent = s.streaming ? 'STOP STREAM' : 'START STREAM';
-            
-            // Update Debug
             document.getElementById('dbg-in').textContent = s.debug.in_rate_kbps.toFixed(1);
             document.getElementById('dbg-out').textContent = s.debug.out_rate_kbps.toFixed(1);
             document.getElementById('dbg-ice').textContent = s.debug.ice_rate_kbps.toFixed(1);
             document.getElementById('dbg-load').textContent = s.debug.load_percent.toFixed(2);
-
             for (let id in channels) channels[id].seen = false;
             s.channels.forEach(ch => {
                 if (!channels[ch.id]) {
@@ -187,11 +162,8 @@
                 const st = channels[ch.id]; st.seen = true;
                 if (document.activeElement !== st.fader) st.fader.value = ch.volume;
                 st.mute.classList.toggle('active', ch.muted); st.solo.classList.toggle('active', ch.soloed);
-                
-                // Buffer Depth Debug
                 const samples = s.debug.buffer_depth[ch.id] || 0;
-                const ms = (samples / (48000 * 2) * 1000).toFixed(0);
-                st.el.querySelector('.buffer-stat').textContent = `BUF: ${ms}ms`;
+                st.el.querySelector('.buffer-stat').textContent = `Q: ${samples}`;
             });
             for (let id in channels) if (!channels[id].seen) { if (mixerNode) mixerNode.port.postMessage({ type: 'remove', data: { id } }); channels[id].el.remove(); delete channels[id]; }
             updateWorkletParams();
@@ -199,7 +171,7 @@
 
         function createStrip(ch) {
             const el = document.createElement('div'); el.className = 'channel-strip';
-            el.innerHTML = `<div class="label-area"><div class="peer-name">${ch.peer_name}</div><div class="ch-name">${ch.name}</div></div><div class="fader-section"><div class="meter-bridge"><div class="meter-fill"></div></div><input type="range" orient="vertical" min="0" max="1.5" step="0.01" value="${ch.volume}"></div><div class="buttons"><button class="mute">M</button><button class="solo">S</button></div><div class="buffer-stat">BUF: 0ms</div>`;
+            el.innerHTML = `<div class="label-area"><div class="peer-name">${ch.peer_name}</div><div class="ch-name">${ch.name}</div></div><div class="fader-section"><div class="meter-bridge"><div class="meter-fill"></div></div><input type="range" orient="vertical" min="0" max="1.5" step="0.01" value="${ch.volume}"></div><div class="buttons"><button class="mute">M</button><button class="solo">S</button></div><div class="buffer-stat">Q: 0</div>`;
             document.getElementById('mixer').appendChild(el);
             const fader = el.querySelector('input'), mute = el.querySelector('.mute'), solo = el.querySelector('.solo');
             fader.oninput = () => { send('volume', { id: ch.id, value: parseFloat(fader.value) }); updateWorkletParams(); saveSettings(); };

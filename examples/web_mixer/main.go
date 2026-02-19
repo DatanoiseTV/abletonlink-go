@@ -143,9 +143,9 @@ type StreamConfig struct {
 
 // -- Audio Engine --
 
-// AudioBuffer holds samples with their absolute musical start time
 type AudioBuffer struct {
 	StartBeat float64
+	EndBeat   float64
 	Samples   []int16
 }
 
@@ -154,11 +154,8 @@ type ChannelStrip struct {
 	ID       string
 	Name     string
 	PeerName string
-	
-	// Sync: List of timestamped buffers
 	queue    []AudioBuffer
 	mu       sync.Mutex
-	
 	Volume   float64
 	Muted    bool
 	Soloed   bool
@@ -169,67 +166,45 @@ type ChannelStrip struct {
 	active   bool
 }
 
-func (cs *ChannelStrip) Push(samples []int16, startBeat float64) {
+func (cs *ChannelStrip) Push(samples []int16, startBeat, bpm float64) {
 	cs.mu.Lock()
 	defer cs.mu.Unlock()
-	
+	durationSec := float64(len(samples)/Channels) / float64(SampleRate)
+	durationBeats := durationSec * (bpm / 60.0)
 	cs.queue = append(cs.queue, AudioBuffer{
 		StartBeat: startBeat,
+		EndBeat:   startBeat + durationBeats,
 		Samples:   samples,
 	})
-	
-	// Keep last 2 seconds
-	if len(cs.queue) > 100 {
-		cs.queue = cs.queue[len(cs.queue)-100:]
-	}
+	if len(cs.queue) > 200 { cs.queue = cs.queue[len(cs.queue)-200:] }
 }
 
-// PopSync tries to find audio for a specific beat window
 func (cs *ChannelStrip) PopSync(startBeat, endBeat float64, frameCount int) []int16 {
 	cs.mu.Lock()
 	defer cs.mu.Unlock()
-	
 	out := make([]int16, frameCount*2)
-	if len(cs.queue) == 0 {
-		return out
-	}
-
-	beatDuration := endBeat - startBeat
-	if beatDuration <= 0 {
-		return out
-	}
-
-	// We look for the buffer that contains startBeat
-	found := false
-	for _, buf := range cs.queue {
-		// Calculate buffer end beat based on sample count and tempo
-		// For simplicity, we assume the tempo in the buffer is stable enough
-		// Link samples usually come in small fixed blocks.
-		
-		// In a real implementation we'd use BeatsPerSample.
-		// For now, let's find the buffer closest to the requested beat.
-		if startBeat >= buf.StartBeat {
-			// This is a candidate. Let's see if we can extract samples.
-			// (Placeholder for precise beat-to-sample indexing)
-			// For now, to solve the drift, we'll just use the most recent buffer
-			// if it's within a reasonable window of the requested beat.
-			diff := startBeat - buf.StartBeat
-			if diff >= 0 && diff < 0.5 { // Within half a beat?
-				// Simple implementation: copy if found
-				n := len(buf.Samples)
-				if n > frameCount*2 { n = frameCount*2 }
-				copy(out, buf.Samples[:n])
-				found = true
-				break
-			}
+	if len(cs.queue) == 0 { return out }
+	var bestBuf *AudioBuffer
+	for i := range cs.queue {
+		if startBeat >= cs.queue[i].StartBeat && startBeat < cs.queue[i].EndBeat {
+			bestBuf = &cs.queue[i]
+			break
 		}
 	}
-
-	if !found {
-		// If not found, we might be ahead or behind. 
-		// Return silence.
+	if bestBuf != nil {
+		n := len(bestBuf.Samples)
+		if n > frameCount*2 { n = frameCount*2 }
+		copy(out, bestBuf.Samples[:n])
+		var p float64
+		for _, s := range out {
+			abs := math.Abs(float64(s)) / 32768.0
+			if abs > p { p = abs }
+		}
+		if p > cs.PeakHold { cs.PeakHold = p }
 	}
-
+	if len(cs.queue) > 0 && cs.queue[0].EndBeat < startBeat-1.0 {
+		cs.queue = cs.queue[1:]
+	}
 	return out
 }
 
@@ -245,12 +220,6 @@ type Mixer struct {
 	streamConn   net.Conn
 	streamEnc    *mp3.Encoder
 	streamMu     sync.Mutex
-
-	// Sync
-	currentMixBeat float64
-	initialized    bool
-
-	// Stats
 	inBytes      int64
 	iceBytes     int64
 	procTime     int64
@@ -288,55 +257,32 @@ func (m *Mixer) StopStream() {
 }
 
 func (m *Mixer) Process(frameCount int) ([]int16, map[string][]int16) {
-	start := time.Now()
+	tstart := time.Now()
 	m.mu.RLock()
 	defer m.mu.RUnlock()
-	
-	// musical timing
-	st := abletonlink.NewSessionState()
-	m.Link.CaptureAppSessionState(st)
+	st := abletonlink.NewSessionState(); m.Link.CaptureAppSessionState(st)
 	bpm := st.Tempo()
-	
-	// Constant delay for jitter buffer (e.g. 250ms)
-	// We mix audio that happened 250ms ago in musical time.
 	delayBeats := (250.0 / 1000.0) * (bpm / 60.0)
 	latencyBeats := (float64(m.LatencyMs) / 1000.0) * (bpm / 60.0)
-	
 	nowBeat := st.BeatAtTime(m.Link.ClockMicros(), 4.0)
 	targetStartBeat := nowBeat - delayBeats + latencyBeats
-	
 	frameDurationBeats := (float64(frameCount) / float64(SampleRate)) * (bpm / 60.0)
 	targetEndBeat := targetStartBeat + frameDurationBeats
 	st.Destroy()
-
 	mixL, mixR := make([]float64, frameCount), make([]float64, frameCount)
 	rawChannels := make(map[string][]int16)
-	
 	anySolo := false
 	for _, ch := range m.Channels { if ch.active && ch.Soloed { anySolo = true; break } }
-	
 	for id, ch := range m.Channels {
 		if !ch.active { continue }
-		
-		// Perfect sync pop
 		input := ch.PopSync(targetStartBeat, targetEndBeat, frameCount)
 		rawChannels[id] = input
-		
-		var peak float64
-		for _, s := range input {
-			abs := math.Abs(float64(s))
-			if abs > peak { peak = abs }
-		}
-		p := peak / 32768.0
-		if p > ch.PeakHold { ch.PeakHold = p }
-		
 		if ch.Muted || (anySolo && !ch.Soloed) { continue }
 		for i := 0; i < frameCount; i++ {
 			mixL[i] += float64(input[i*2]) * ch.Volume
 			mixR[i] += float64(input[i*2+1]) * ch.Volume
 		}
 	}
-	
 	out := make([]int16, frameCount*2)
 	mVol := m.MasterVolume
 	if m.MasterMuted { mVol = 0 }
@@ -350,7 +296,7 @@ func (m *Mixer) Process(frameCount int) ([]int16, map[string][]int16) {
 		if math.Abs(r) > mp { mp = math.Abs(r) }
 	}
 	m.MasterPeak = mp / 32768.0
-	atomic.AddInt64(&m.procTime, int64(time.Since(start)))
+	atomic.AddInt64(&m.procTime, int64(time.Since(tstart)))
 	return out, rawChannels
 }
 
@@ -362,16 +308,14 @@ func main() {
 	port := flag.Int("port", 8080, "Web port")
 	flag.Parse()
 	setRealtimePriority()
-	
 	link := abletonlink.NewLinkWithName(120.0, "WebMixer")
 	defer link.Destroy()
+	link.SetNumPeersCallback(func(n uint64) { log.Printf("[Link] Peers: %d", n) })
 	link.Enable(true); link.EnableAudio(true); link.EnableStartStopSync(true)
 	dummySink := link.NewSink("WebMixer", 16384)
 	defer dummySink.Destroy()
-
 	mixer := &Mixer{MasterVolume: 1.0, Channels: make(map[string]*ChannelStrip), Link: link}
 	hub := newHub()
-	
 	go func() {
 		for {
 			channels := link.Channels()
@@ -381,17 +325,15 @@ func main() {
 				id := fmt.Sprintf("%d", ch.ID)
 				activeIDs[id] = true
 				if _, ok := mixer.Channels[id]; !ok {
-					newStrip := &ChannelStrip{RawID: ch.ID, ID: id, Name: ch.Name, PeerName: ch.PeerName, Volume: 0.8, queue: make([]AudioBuffer, 0, 100), active: true, lastSeen: time.Now()}
+					log.Printf("[Link] New channel: %s", ch.Name)
+					newStrip := &ChannelStrip{RawID: ch.ID, ID: id, Name: ch.Name, PeerName: ch.PeerName, Volume: 0.8, buffer: make([]int16, 0, 32768), active: true, lastSeen: time.Now()}
 					newStrip.resamp = NewResampler(48000, SampleRate, Channels)
 					s := newStrip
 					newStrip.source = link.NewSource(ch.ID, func(samples []int16, info abletonlink.SourceBufferInfo) {
 						atomic.AddInt64(&mixer.inBytes, int64(len(samples)*2))
 						if int(info.SampleRate) != s.resamp.inRate { s.resamp = NewResampler(int(info.SampleRate), SampleRate, Channels) }
 						res := s.resamp.Resample(samples)
-						if res != nil {
-							// Push with musical start time
-							s.Push(res, info.SessionBeatTime)
-						}
+						if res != nil { s.Push(res, info.SessionBeatTime, info.Tempo) }
 						s.lastSeen = time.Now()
 					})
 					mixer.Channels[id] = newStrip
@@ -408,7 +350,6 @@ func main() {
 			time.Sleep(time.Second)
 		}
 	}()
-	
 	go func() {
 		ticker := time.NewTicker(time.Duration(float64(FrameSize)/float64(SampleRate)*1000) * time.Millisecond)
 		for range ticker.C {
@@ -429,9 +370,8 @@ func main() {
 					fmt.Sscanf(id, "%d", &rawID)
 					binary.Write(buf, binary.LittleEndian, rawID)
 					binary.Write(buf, binary.LittleEndian, uint32(len(samples)))
-					f32 := make([]float32, len(samples))
-					for i, s := range samples { f32[i] = float32(s) / 32768.0 }
-					binary.Write(buf, binary.LittleEndian, f32)
+					// Transmit as int16 to save bandwidth (2x reduction over f32)
+					binary.Write(buf, binary.LittleEndian, samples)
 				}
 				data := buf.Bytes()
 				atomic.AddInt64(&hub.outBytes, int64(len(data)))
@@ -439,15 +379,12 @@ func main() {
 			}
 		}
 	}()
-	
 	go hub.run(mixer)
 	http.Handle("/", http.FileServer(http.FS(content)))
 	http.HandleFunc("/ws", func(w http.ResponseWriter, r *http.Request) { serveWs(hub, mixer, w, r) })
-	log.Printf("Listening on http://localhost:%d", *port)
+	log.Printf("Listening on :%d", *port)
 	log.Fatal(http.ListenAndServe(fmt.Sprintf(":%d", *port), nil))
 }
-
-// -- Hub --
 
 type Hub struct {
 	clients map[*Client]bool
@@ -462,7 +399,7 @@ func (h *Hub) broadcastBinary(d []byte, monOnly bool) {
 	for c := range h.clients { if !monOnly || c.mon { select { case c.send <- d: default: } } }
 }
 func (h *Hub) run(m *Mixer) {
-	ticker := time.NewTicker(1000 * time.Millisecond)
+	ticker := time.NewTicker(100 * time.Millisecond)
 	for {
 		select {
 		case c := <-h.register: h.clients[c] = true
@@ -472,10 +409,10 @@ func (h *Hub) run(m *Mixer) {
 				delete(h.clients, c); close(c.send)
 			}
 		case <-ticker.C:
-			inRate := float64(atomic.SwapInt64(&m.inBytes, 0)) * 8 / 1024
-			outRate := float64(atomic.SwapInt64(&h.outBytes, 0)) * 8 / 1024
-			iceRate := float64(atomic.SwapInt64(&m.iceBytes, 0)) * 8 / 1024
-			load := float64(atomic.SwapInt64(&m.procTime, 0)) / float64(time.Second) * 100
+			inRate := float64(atomic.SwapInt64(&m.inBytes, 0)) * 8 / 1024 / 0.1
+			outRate := float64(atomic.SwapInt64(&h.outBytes, 0)) * 8 / 1024 / 0.1
+			iceRate := float64(atomic.SwapInt64(&m.iceBytes, 0)) * 8 / 1024 / 0.1
+			load := float64(atomic.SwapInt64(&m.procTime, 0)) / float64(100*time.Millisecond) * 100
 
 			st := abletonlink.NewSessionState(); m.Link.CaptureAppSessionState(st)
 			bpm, playing := st.Tempo(), st.IsPlaying(); st.Destroy()
@@ -495,7 +432,7 @@ func (h *Hub) run(m *Mixer) {
 			bS, _ := json.Marshal(WSMessage{Type: "state", Data: mustMarshal(msg)})
 			bM, _ := json.Marshal(WSMessage{Type: "meters", Data: mustMarshal(mets)})
 			atomic.AddInt64(&h.outBytes, int64(len(bS)+len(bM)))
-			for c := range h.clients { select { case c.send <- bS: default: } ; select { case c.send <- bM: default: } }
+			for c := range h.clients { select { case c.send <- bS: default: }; select { case c.send <- bM: default: } }
 		}
 	}
 }
@@ -518,31 +455,21 @@ func serveWs(h *Hub, m *Mixer, w http.ResponseWriter, r *http.Request) {
 					var cmd VolumeCmd
 					if json.Unmarshal(msg.Data, &cmd) == nil {
 						m.mu.Lock()
-						if cmd.ID == "master" {
-							m.MasterVolume = cmd.Value
-						} else if ch, ok := m.Channels[cmd.ID]; ok {
-							ch.Volume = cmd.Value
-						}
+						if cmd.ID == "master" { m.MasterVolume = cmd.Value } else if ch, ok := m.Channels[cmd.ID]; ok { ch.Volume = cmd.Value }
 						m.mu.Unlock()
 					}
 				case "mute":
 					var cmd BoolCmd
 					if json.Unmarshal(msg.Data, &cmd) == nil {
 						m.mu.Lock()
-						if cmd.ID == "master" {
-							m.MasterMuted = cmd.Value
-						} else if ch, ok := m.Channels[cmd.ID]; ok {
-							ch.Muted = cmd.Value
-						}
+						if cmd.ID == "master" { m.MasterMuted = cmd.Value } else if ch, ok := m.Channels[cmd.ID]; ok { m.Muted = cmd.Value }
 						m.mu.Unlock()
 					}
 				case "solo":
 					var cmd BoolCmd
 					if json.Unmarshal(msg.Data, &cmd) == nil {
 						m.mu.Lock()
-						if ch, ok := m.Channels[cmd.ID]; ok {
-							ch.Soloed = cmd.Value
-						}
+						if ch, ok := m.Channels[cmd.ID]; ok { ch.Soloed = cmd.Value }
 						m.mu.Unlock()
 					}
 				case "latency":
