@@ -183,9 +183,6 @@ func (cs *ChannelStrip) Pop(count int) []int16 {
 	cs.mu.Lock()
 	defer cs.mu.Unlock()
 	
-	// If not enough data, pad with silence or return partial?
-	// Returning strict count is better for mixing stability.
-	
 	out := make([]int16, count)
 	
 	if len(cs.buffer) == 0 {
@@ -444,7 +441,6 @@ func (h *Hub) run(m *Mixer) {
 			m.mu.RUnlock()
 			sort.Slice(msg.Channels, func(i, j int) bool { return msg.Channels[i].Name < msg.Channels[j].Name })
 			bS, _ := json.Marshal(WSMessage{Type: "state", Data: mustMarshal(msg)})
-			
 			h.broadcastBinary(mb.Bytes(), false)
 			atomic.AddInt64(&h.outBytes, int64(len(bS)))
 			for c := range h.clients { select { case c.send <- bS: default: } }
@@ -477,7 +473,7 @@ func serveWs(h *Hub, m *Mixer, w http.ResponseWriter, r *http.Request) {
 					var cmd BoolCmd
 					if json.Unmarshal(msg.Data, &cmd) == nil {
 						m.mu.Lock()
-						if cmd.ID == "master" { m.MasterMuted = cmd.Value } else if ch, ok := m.Channels[cmd.ID]; ok { m.Muted = cmd.Value }
+						if cmd.ID == "master" { m.MasterMuted = cmd.Value } else if ch, ok := m.Channels[cmd.ID]; ok { ch.Muted = cmd.Value }
 						m.mu.Unlock()
 					}
 				case "solo":

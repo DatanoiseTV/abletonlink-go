@@ -104,13 +104,13 @@
                 if (type === 1) { 
                     if (!monitoring || !mixerNode) return;
                     let offset = 4;
-                    const startBeat = dv.getFloat64(offset, true); offset += 8;
+                    // Removed startBeat read
                     const numBundles = dv.getUint32(offset, true); offset += 4;
                     for (let i = 0; i < numBundles; i++) {
                         const id = dv.getBigUint64(offset, true).toString(); offset += 8;
                         const numSamples = dv.getUint32(offset, true); offset += 4;
                         const samples = new Int16Array(e.data, offset, numSamples).slice(); offset += numSamples * 2;
-                        mixerNode.port.postMessage({ type: 'audio', data: { id, samples, startBeat } });
+                        mixerNode.port.postMessage({ type: 'audio', data: { id, samples } });
                     }
                 } else if (type === 2) { 
                     let offset = 4;

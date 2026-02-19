@@ -1,31 +1,22 @@
 class MixerWorklet extends AudioWorkletProcessor {
   constructor() {
     super();
-    this.channels = new Map(); // id -> { buffer: Float32Array, startBeat: number, gain: number, mute: bool, solo: bool }
+    this.channels = new Map();
     this.masterGain = 1.0;
     this.masterMute = false;
-    this.currentBeat = -1;
-    this.beatsPerSample = 0;
     
     this.port.onmessage = (e) => {
       const { type, data } = e.data;
       if (type === 'audio') {
         let ch = this.channels.get(data.id);
         if (!ch) {
-          ch = { buffer: new Float32Array(0), startBeat: data.startBeat, gain: 0.8, mute: false, solo: false };
+          ch = { buffer: new Float32Array(0), gain: 0.8, mute: false, solo: false };
           this.channels.set(data.id, ch);
         }
         
-        // Convert Int16 to Float32
         const f32 = new Float32Array(data.samples.length);
         for(let i=0; i<data.samples.length; i++) f32[i] = data.samples[i] / 32768.0;
 
-        // Alignment logic: if this is our first packet, set currentBeat
-        if (this.currentBeat === -1) {
-          this.currentBeat = data.startBeat;
-        }
-
-        // Add to channel buffer
         const newBuf = new Float32Array(ch.buffer.length + f32.length);
         newBuf.set(ch.buffer);
         newBuf.set(f32, ch.buffer.length);
@@ -60,11 +51,6 @@ class MixerWorklet extends AudioWorkletProcessor {
     const activeChannels = Array.from(this.channels.values());
     const anySolo = activeChannels.some(ch => ch.solo);
 
-    // Timeline management
-    // We assume 120BPM default until we get a better way to stream tempo to worklet
-    // but the server sends SessionBeatTime.
-    // For monitoring, simple FIFO after initial sync is usually enough if server is sync'd.
-    
     for (const [id, ch] of this.channels) {
       if (ch.buffer.length < frameCount * 2) continue;
 
