@@ -120,7 +120,7 @@ type SourceBufferInfo struct {
 
 // NewLink creates a new Link instance with the given initial tempo in BPM
 func NewLink(bpm float64) *Link {
-	return NewLinkWithName(bpm, "LinkAudio")
+	return NewLinkWithName(bpm, "icecast")
 }
 
 // NewLinkWithName creates a new Link instance with the given initial tempo and peer name

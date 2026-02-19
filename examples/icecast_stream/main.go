@@ -394,7 +394,7 @@ func wizard() IcecastConfig {
 		Password:    "hackme",
 		User:        "source",
 		Bitrate:     128,
-		Name:        "Link Audio Stream",
+		Name:        "icecast",
 		Description: "Live from Ableton Link Go",
 	}
 
