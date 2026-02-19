@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Link Mixer</title>
+    <title>Link Web Mixer</title>
     <style>
         body { font-family: "SF Mono", "Monaco", "Inconsolata", monospace; background: #121212; color: #ddd; margin: 0; padding: 20px; user-select: none; }
         .container { max-width: 1400px; margin: 0 auto; }
@@ -30,7 +30,6 @@
         button.solo.active { background: #ffc107; color: #000; }
         button.mon.active { background: #00bcd4; color: #000; }
         button.stream.active { background: #e74c3c; color: #fff; animation: blink 1s infinite; }
-        @keyframes blink { 0% { opacity: 1; } 50% { opacity: 0.6; } 100% { opacity: 1; } }
         .master-controls { width: 100%; margin-top: 15px; display: flex; flex-direction: column; gap: 8px; }
         .config-panel { margin-top: 15px; padding-top: 15px; border-top: 1px solid #333; width: 100%; }
         .config-panel input { background: #000; border: 1px solid #444; color: #0f0; font-family: monospace; font-size: 10px; width: 100%; box-sizing: border-box; padding: 4px; margin-bottom: 5px; }
@@ -45,34 +44,17 @@
 <body>
     <div class="container">
         <header>
-            <div>
-                <div style="font-size: 18px; font-weight: bold; letter-spacing: 1px;">LINK WEB MIXER</div>
-                <div id="status" style="font-size: 9px; color: #555;">CONNECTING...</div>
-            </div>
-            <div class="bpm-area">
-                <div class="bpm-value" id="bpm">120.00</div>
-                <div class="bpm-label">BPM</div>
-            </div>
+            <div><div style="font-size: 18px; font-weight: bold; letter-spacing: 1px;">LINK WEB MIXER</div><div id="status" style="font-size: 9px; color: #555;">CONNECTING...</div></div>
+            <div class="bpm-area"><div class="bpm-value" id="bpm">120.00</div><div class="bpm-label">BPM</div></div>
         </header>
         <div class="main-view">
             <div class="mixer-surface" id="mixer"></div>
             <div class="channel-strip master">
                 <div class="label-area"><div class="peer-name">OUT</div><div class="ch-name">MASTER</div></div>
                 <button id="transport-btn">LINK PLAY</button>
-                <div class="fader-section">
-                    <div class="meter-bridge"><div class="meter-fill" id="meter-master"></div></div>
-                    <input type="range" orient="vertical" min="0" max="1.5" step="0.01" id="vol-master" value="1.0">
-                </div>
-                
-                <div class="latency-control">
-                    <label style="font-size: 8px; color: #666; display: block; margin-bottom: 5px;">SYNC OFFSET: <span id="lat-val">0</span>ms</label>
-                    <input type="range" min="-500" max="500" step="1" id="lat-slider" value="0">
-                </div>
-
-                <div class="master-controls">
-                    <button id="mon-btn" class="mon">MONITOR</button>
-                    <button id="stream-btn" class="stream">STREAM</button>
-                </div>
+                <div class="fader-section"><div class="meter-bridge"><div class="meter-fill" id="meter-master"></div></div><input type="range" orient="vertical" min="0" max="1.5" step="0.01" id="vol-master" value="1.0"></div>
+                <div class="latency-control"><label style="font-size: 8px; color: #666; display: block; margin-bottom: 5px;">SYNC OFFSET: <span id="lat-val">0</span>ms</label><input type="range" min="-500" max="500" step="1" id="lat-slider" value="0"></div>
+                <div class="master-controls"><button id="mon-btn" class="mon">MONITOR</button><button id="stream-btn" class="stream">STREAM</button></div>
                 <div class="config-panel">
                     <label>ICE-HOST</label><input type="text" id="ice-host" value="localhost">
                     <label>ICE-PORT</label><input type="number" id="ice-port" value="8000">
@@ -86,26 +68,131 @@
     <script>
         const ws = new WebSocket(`${window.location.protocol==='https:'?'wss:':'ws:'}//${window.location.host}/ws`);
         ws.binaryType = 'arraybuffer';
-        let channels = {}, ctx = null, nextTime = 0, monitoring = false, localSettings = {};
+        let channels = {}, ctx = null, mixerNode = null, monitoring = false, localSettings = {};
 
-        function saveSettings() {
-            const config = {
-                host: document.getElementById('ice-host').value,
-                port: document.getElementById('ice-port').value,
-                user: document.getElementById('ice-user').value,
-                pass: document.getElementById('ice-pass').value,
-                mount: document.getElementById('ice-mount').value,
-                masterVol: document.getElementById('vol-master').value,
-                latency: document.getElementById('lat-slider').value,
+        async function initAudio() {
+            if (ctx) return;
+            ctx = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: 48000 });
+            await ctx.audioWorklet.addModule('worklet.js');
+            mixerNode = new AudioWorkletNode(ctx, 'mixer-worklet');
+            mixerNode.connect(ctx.destination);
+            updateWorkletParams();
+        }
+
+        function updateWorkletParams() {
+            if (!mixerNode) return;
+            const params = {
+                masterVol: parseFloat(document.getElementById('vol-master').value),
+                masterMute: false, // could add master mute
                 channels: {}
             };
             for (let id in channels) {
-                config.channels[id] = {
-                    vol: channels[id].fader.value,
+                params.channels[id] = {
+                    vol: parseFloat(channels[id].fader.value),
                     mute: channels[id].mute.classList.contains('active'),
                     solo: channels[id].solo.classList.contains('active')
                 };
             }
+            mixerNode.port.postMessage({ type: 'params', data: params });
+        }
+
+        ws.onopen = () => { loadSettings(); };
+        ws.onmessage = (e) => {
+            if (e.data instanceof ArrayBuffer) {
+                if (!monitoring || !mixerNode) return;
+                // Protocol: [Uint32: NumBundles] (Bundle: [8 bytes ID] [Uint32: NumSamples] [F32 Samples])
+                const dv = new DataView(e.data);
+                let offset = 0;
+                const numBundles = dv.getUint32(offset, true); offset += 4;
+                for (let i = 0; i < numBundles; i++) {
+                    const id = dv.getBigUint64(offset, true).toString(); offset += 8;
+                    const numSamples = dv.getUint32(offset, true); offset += 4;
+                    const samples = new Float32Array(e.data, offset, numSamples); offset += numSamples * 4;
+                    mixerNode.port.postMessage({ type: 'audio', data: { id, samples } });
+                }
+                return;
+            }
+            const msg = JSON.parse(e.data);
+            if (msg.type === 'state') updateState(msg.data);
+            if (msg.type === 'meters') updateMeters(msg.data);
+        };
+
+        const send = (type, data) => ws.readyState === 1 && ws.send(JSON.stringify({type, data}));
+
+        document.getElementById('transport-btn').onclick = function() { send('transport', { playing: !this.classList.contains('playing') }); };
+        document.getElementById('mon-btn').onclick = async function() {
+            await initAudio(); monitoring = !monitoring;
+            this.classList.toggle('active', monitoring);
+            if (monitoring && ctx.state === 'suspended') ctx.resume();
+            send('monitor', { enabled: monitoring });
+        };
+        document.getElementById('stream-btn').onclick = () => {
+            const active = document.getElementById('stream-btn').classList.contains('active');
+            if (!active) {
+                saveSettings();
+                send('start_stream', { host: document.getElementById('ice-host').value, port: parseInt(document.getElementById('ice-port').value), user: document.getElementById('ice-user').value, pass: document.getElementById('ice-pass').value, mount: document.getElementById('ice-mount').value });
+            } else send('stop_stream', {});
+        };
+        document.getElementById('lat-slider').oninput = (e) => {
+            const val = parseInt(e.target.value);
+            document.getElementById('lat-val').textContent = val;
+            send('latency', { value: val });
+            saveSettings();
+        };
+        document.getElementById('vol-master').oninput = (e) => { send('volume', { id: 'master', value: parseFloat(e.target.value) }); updateWorkletParams(); saveSettings(); };
+
+        function updateState(s) {
+            document.getElementById('bpm').textContent = s.bpm.toFixed(2);
+            document.getElementById('status').textContent = `PEERS: ${s.peers} | ${s.streaming ? 'STREAMING' : 'IDLE'}`;
+            const tb = document.getElementById('transport-btn');
+            tb.classList.toggle('playing', s.playing); tb.textContent = s.playing ? 'LINK STOP' : 'LINK PLAY';
+            document.getElementById('stream-btn').classList.toggle('active', s.streaming);
+            document.getElementById('stream-btn').textContent = s.streaming ? 'STOP STREAM' : 'START STREAM';
+            
+            for (let id in channels) channels[id].seen = false;
+            s.channels.forEach(ch => {
+                if (!channels[ch.id]) {
+                    createStrip(ch);
+                    if (localSettings[ch.id]) {
+                        const s = localSettings[ch.id];
+                        send('volume', { id: ch.id, value: parseFloat(s.vol) });
+                        send('mute', { id: ch.id, value: s.mute });
+                        send('solo', { id: ch.id, value: s.solo });
+                    }
+                }
+                const st = channels[ch.id];
+                st.seen = true;
+                if (document.activeElement !== st.fader) st.fader.value = ch.volume;
+                st.mute.classList.toggle('active', ch.muted); st.solo.classList.toggle('active', ch.soloed);
+            });
+            for (let id in channels) if (!channels[id].seen) { 
+                if (mixerNode) mixerNode.port.postMessage({ type: 'remove', data: { id } });
+                channels[id].el.remove(); delete channels[id]; 
+            }
+            updateWorkletParams();
+        }
+
+        function createStrip(ch) {
+            const el = document.createElement('div'); el.className = 'channel-strip';
+            el.innerHTML = `<div class="label-area"><div class="peer-name">${ch.peer_name}</div><div class="ch-name">${ch.name}</div></div><div class="fader-section"><div class="meter-bridge"><div class="meter-fill"></div></div><input type="range" orient="vertical" min="0" max="1.5" step="0.01" value="${ch.volume}"></div><div class="buttons"><button class="mute">M</button><button class="solo">S</button></div>`;
+            document.getElementById('mixer').appendChild(el);
+            const fader = el.querySelector('input'), mute = el.querySelector('.mute'), solo = el.querySelector('.solo');
+            fader.oninput = () => { send('volume', { id: ch.id, value: parseFloat(fader.value) }); updateWorkletParams(); saveSettings(); };
+            mute.onclick = () => { send('mute', { id: ch.id, value: !mute.classList.contains('active') }); updateWorkletParams(); saveSettings(); };
+            solo.onclick = () => { send('solo', { id: ch.id, value: !solo.classList.contains('active') }); updateWorkletParams(); saveSettings(); };
+            channels[ch.id] = { el, fader, mute, solo, meter: el.querySelector('.meter-fill') };
+        }
+
+        function updateMeters(m) {
+            for (let id in m) {
+                const target = id === 'master' ? document.getElementById('meter-master') : channels[id]?.meter;
+                if (target) target.style.height = `${Math.min(100, m[id]*100)}%`;
+            }
+        }
+
+        function saveSettings() {
+            const config = { host: document.getElementById('ice-host').value, port: document.getElementById('ice-port').value, user: document.getElementById('ice-user').value, pass: document.getElementById('ice-pass').value, mount: document.getElementById('ice-mount').value, masterVol: document.getElementById('vol-master').value, latency: document.getElementById('lat-slider').value, channels: {} };
+            for (let id in channels) config.channels[id] = { vol: channels[id].fader.value, mute: channels[id].mute.classList.contains('active'), solo: channels[id].solo.classList.contains('active') };
             localStorage.setItem('mixerSettings', JSON.stringify(config));
         }
 
@@ -124,128 +211,6 @@
                 localSettings = config.channels || {};
                 send('volume', { id: 'master', value: parseFloat(document.getElementById('vol-master').value) });
                 send('latency', { value: parseInt(document.getElementById('lat-slider').value) });
-            }
-        }
-
-        function initAudio() {
-            if (ctx) return;
-            ctx = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: 48000 });
-            nextTime = ctx.currentTime + 0.1;
-        }
-
-        ws.onopen = () => { loadSettings(); };
-        ws.onmessage = (e) => {
-            if (e.data instanceof ArrayBuffer) {
-                if (!monitoring || !ctx) return;
-                const f32 = new Float32Array(e.data);
-                const buf = ctx.createBuffer(2, f32.length/2, 48000);
-                for(let c=0; c<2; c++) {
-                    const data = buf.getChannelData(c);
-                    for(let i=0; i<f32.length/2; i++) data[i] = f32[i*2+c];
-                }
-                const src = ctx.createBufferSource();
-                src.buffer = buf; src.connect(ctx.destination);
-                const now = ctx.currentTime;
-                if (nextTime < now) nextTime = now + 0.02;
-                src.start(nextTime); nextTime += buf.duration;
-                return;
-            }
-            const msg = JSON.parse(e.data);
-            if (msg.type === 'state') updateState(msg.data);
-            if (msg.type === 'meters') updateMeters(msg.data);
-        };
-
-        const send = (type, data) => ws.readyState === 1 && ws.send(JSON.stringify({type, data}));
-
-        document.getElementById('transport-btn').onclick = function() {
-            send('transport', { playing: !this.classList.contains('playing') });
-        };
-
-        document.getElementById('mon-btn').onclick = function() {
-            initAudio(); monitoring = !monitoring;
-            this.classList.toggle('active', monitoring);
-            if (monitoring && ctx.state === 'suspended') ctx.resume();
-            send('monitor', { enabled: monitoring });
-        };
-
-        document.getElementById('stream-btn').onclick = () => {
-            if (!document.getElementById('stream-btn').classList.contains('active')) {
-                saveSettings();
-                send('start_stream', {
-                    host: document.getElementById('ice-host').value,
-                    port: parseInt(document.getElementById('ice-port').value),
-                    user: document.getElementById('ice-user').value,
-                    pass: document.getElementById('ice-pass').value,
-                    mount: document.getElementById('ice-mount').value
-                });
-            } else send('stop_stream', {});
-        };
-
-        document.getElementById('lat-slider').oninput = (e) => {
-            const val = parseInt(e.target.value);
-            document.getElementById('lat-val').textContent = val;
-            send('latency', { value: val });
-            saveSettings();
-        };
-
-        document.querySelectorAll('.config-panel input').forEach(el => el.onchange = saveSettings);
-        document.getElementById('vol-master').oninput = (e) => {
-            send('volume', { id: 'master', value: parseFloat(e.target.value) });
-            saveSettings();
-        };
-
-        function updateState(s) {
-            document.getElementById('bpm').textContent = s.bpm.toFixed(2);
-            document.getElementById('status').textContent = `PEERS: ${s.peers} | ${s.streaming ? 'STREAMING' : 'IDLE'}`;
-            const tb = document.getElementById('transport-btn');
-            tb.classList.toggle('playing', s.playing);
-            tb.textContent = s.playing ? 'LINK STOP' : 'LINK PLAY';
-            document.getElementById('stream-btn').classList.toggle('active', s.streaming);
-            document.getElementById('stream-btn').textContent = s.streaming ? 'STOP STREAM' : 'START STREAM';
-            
-            for (let id in channels) channels[id].seen = false;
-            s.channels.forEach(ch => {
-                if (!channels[ch.id]) {
-                    createStrip(ch);
-                    if (localSettings[ch.id]) {
-                        const s = localSettings[ch.id];
-                        send('volume', { id: ch.id, value: parseFloat(s.vol) });
-                        send('mute', { id: ch.id, value: s.mute });
-                        send('solo', { id: ch.id, value: s.solo });
-                    }
-                }
-                const st = channels[ch.id];
-                st.seen = true;
-                if (document.activeElement !== st.fader) st.fader.value = ch.volume;
-                st.mute.classList.toggle('active', ch.muted);
-                st.solo.classList.toggle('active', ch.soloed);
-            });
-            for (let id in channels) if (!channels[id].seen) { channels[id].el.remove(); delete channels[id]; }
-        }
-
-        function createStrip(ch) {
-            const el = document.createElement('div');
-            el.className = 'channel-strip';
-            el.innerHTML = `
-                <div class="label-area"><div class="peer-name">${ch.peer_name}</div><div class="ch-name">${ch.name}</div></div>
-                <div class="fader-section">
-                    <div class="meter-bridge"><div class="meter-fill"></div></div>
-                    <input type="range" orient="vertical" min="0" max="1.5" step="0.01" value="${ch.volume}">
-                </div>
-                <div class="buttons"><button class="mute">M</button><button class="solo">S</button></div>
-            `;
-            document.getElementById('mixer').appendChild(el);
-            const fader = el.querySelector('input'), mute = el.querySelector('.mute'), solo = el.querySelector('.solo');
-            fader.oninput = () => { send('volume', { id: ch.id, value: parseFloat(fader.value) }); saveSettings(); };
-            mute.onclick = () => { send('mute', { id: ch.id, value: !mute.classList.contains('active') }); saveSettings(); };
-            solo.onclick = () => { send('solo', { id: ch.id, value: !solo.classList.contains('active') }); saveSettings(); };
-            channels[ch.id] = { el, fader, mute, solo, meter: el.querySelector('.meter-fill') };
-        }
-
-        function updateMeters(m) {
-            for (let id in m) {
-                const target = id === 'master' ? document.getElementById('meter-master') : channels[id]?.meter;
-                if (target) target.style.height = `${Math.min(100, m[id]*100)}%`;
             }
         }
     </script>
