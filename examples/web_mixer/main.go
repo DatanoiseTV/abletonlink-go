@@ -145,7 +145,6 @@ type StreamConfig struct {
 
 type AudioBuffer struct {
 	StartBeat float64
-	EndBeat   float64
 	Samples   []int16
 }
 
@@ -166,45 +165,73 @@ type ChannelStrip struct {
 	active   bool
 }
 
-func (cs *ChannelStrip) Push(samples []int16, startBeat, bpm float64) {
+func (cs *ChannelStrip) Push(samples []int16, startBeat float64) {
 	cs.mu.Lock()
 	defer cs.mu.Unlock()
-	durationSec := float64(len(samples)/Channels) / float64(SampleRate)
-	durationBeats := durationSec * (bpm / 60.0)
+	
 	cs.queue = append(cs.queue, AudioBuffer{
 		StartBeat: startBeat,
-		EndBeat:   startBeat + durationBeats,
 		Samples:   samples,
 	})
-	if len(cs.queue) > 200 { cs.queue = cs.queue[len(cs.queue)-200:] }
+	
+	if len(cs.queue) > 500 { // Keep last few seconds
+		cs.queue = cs.queue[len(cs.queue)-500:]
+	}
 }
 
-func (cs *ChannelStrip) PopSync(startBeat, endBeat float64, frameCount int) []int16 {
+func (cs *ChannelStrip) PopSync(startBeat, endBeat float64, frameCount int, bpm float64) []int16 {
 	cs.mu.Lock()
 	defer cs.mu.Unlock()
+	
 	out := make([]int16, frameCount*2)
 	if len(cs.queue) == 0 { return out }
-	var bestBuf *AudioBuffer
-	for i := range cs.queue {
-		if startBeat >= cs.queue[i].StartBeat && startBeat < cs.queue[i].EndBeat {
-			bestBuf = &cs.queue[i]
-			break
+
+	samplesPerBeat := (float64(SampleRate) * 60.0) / bpm
+	
+	for _, buf := range cs.queue {
+		// Calculate where this buffer sits in the requested window
+		// startBeat is the musical time we want at output index 0
+		
+		bufStartSampleIdx := int((buf.StartBeat - startBeat) * samplesPerBeat)
+		bufEndSampleIdx := bufStartSampleIdx + (len(buf.Samples) / Channels)
+		
+		// If buffer overlaps with [0, frameCount]
+		renderStart := bufStartSampleIdx
+		renderEnd := bufEndSampleIdx
+		
+		if renderStart < 0 { renderStart = 0 }
+		if renderEnd > frameCount { renderEnd = frameCount }
+		
+		if renderStart < renderEnd {
+			// Copy overlapping part
+			srcStart := (renderStart - bufStartSampleIdx) * Channels
+			dstStart := renderStart * Channels
+			count := (renderEnd - renderStart) * Channels
+			
+			if srcStart >= 0 && srcStart+count <= len(buf.Samples) {
+				copy(out[dstStart:], buf.Samples[srcStart:srcStart+count])
+			}
 		}
 	}
-	if bestBuf != nil {
-		n := len(bestBuf.Samples)
-		if n > frameCount*2 { n = frameCount*2 }
-		copy(out, bestBuf.Samples[:n])
-		var p float64
-		for _, s := range out {
-			abs := math.Abs(float64(s)) / 32768.0
-			if abs > p { p = abs }
+
+	// Metering
+	var p float64
+	for _, s := range out {
+		abs := math.Abs(float64(s)) / 32768.0
+		if abs > p { p = abs }
+	}
+	if p > cs.PeakHold { cs.PeakHold = p }
+
+	// Cleanup queue: remove buffers that are entirely before our window
+	newQueue := cs.queue[:0]
+	for _, buf := range cs.queue {
+		bufEndBeat := buf.StartBeat + (float64(len(buf.Samples)/Channels) / samplesPerBeat)
+		if bufEndBeat > startBeat - 1.0 { // Keep some history
+			newQueue = append(newQueue, buf)
 		}
-		if p > cs.PeakHold { cs.PeakHold = p }
 	}
-	if len(cs.queue) > 0 && cs.queue[0].EndBeat < startBeat-1.0 {
-		cs.queue = cs.queue[1:]
-	}
+	cs.queue = newQueue
+
 	return out
 }
 
@@ -256,26 +283,31 @@ func (m *Mixer) StopStream() {
 	m.streaming = false
 }
 
-func (m *Mixer) Process(frameCount int) ([]int16, map[string][]int16) {
+func (m *Mixer) Process(frameCount int) ([]int16, map[string][]int16, float64) {
 	tstart := time.Now()
 	m.mu.RLock()
 	defer m.mu.RUnlock()
+	
 	st := abletonlink.NewSessionState(); m.Link.CaptureAppSessionState(st)
 	bpm := st.Tempo()
-	delayBeats := (250.0 / 1000.0) * (bpm / 60.0)
+	
+	// Musical time synchronization
+	delayBeats := (300.0 / 1000.0) * (bpm / 60.0) // 300ms lookback for jitter
 	latencyBeats := (float64(m.LatencyMs) / 1000.0) * (bpm / 60.0)
+	
 	nowBeat := st.BeatAtTime(m.Link.ClockMicros(), 4.0)
 	targetStartBeat := nowBeat - delayBeats + latencyBeats
 	frameDurationBeats := (float64(frameCount) / float64(SampleRate)) * (bpm / 60.0)
 	targetEndBeat := targetStartBeat + frameDurationBeats
 	st.Destroy()
+
 	mixL, mixR := make([]float64, frameCount), make([]float64, frameCount)
 	rawChannels := make(map[string][]int16)
 	anySolo := false
 	for _, ch := range m.Channels { if ch.active && ch.Soloed { anySolo = true; break } }
 	for id, ch := range m.Channels {
 		if !ch.active { continue }
-		input := ch.PopSync(targetStartBeat, targetEndBeat, frameCount)
+		input := ch.PopSync(targetStartBeat, targetEndBeat, frameCount, bpm)
 		rawChannels[id] = input
 		if ch.Muted || (anySolo && !ch.Soloed) { continue }
 		for i := 0; i < frameCount; i++ {
@@ -297,7 +329,7 @@ func (m *Mixer) Process(frameCount int) ([]int16, map[string][]int16) {
 	}
 	m.MasterPeak = mp / 32768.0
 	atomic.AddInt64(&m.procTime, int64(time.Since(tstart)))
-	return out, rawChannels
+	return out, rawChannels, targetStartBeat
 }
 
 var upgrader = websocket.Upgrader{
@@ -326,14 +358,14 @@ func main() {
 				activeIDs[id] = true
 				if _, ok := mixer.Channels[id]; !ok {
 					log.Printf("[Link] New channel: %s", ch.Name)
-					newStrip := &ChannelStrip{RawID: ch.ID, ID: id, Name: ch.Name, PeerName: ch.PeerName, Volume: 0.8, queue: make([]AudioBuffer, 0, 200), active: true, lastSeen: time.Now()}
+					newStrip := &ChannelStrip{RawID: ch.ID, ID: id, Name: ch.Name, PeerName: ch.PeerName, Volume: 0.8, queue: make([]AudioBuffer, 0, 500), active: true, lastSeen: time.Now()}
 					newStrip.resamp = NewResampler(48000, SampleRate, Channels)
 					s := newStrip
 					newStrip.source = link.NewSource(ch.ID, func(samples []int16, info abletonlink.SourceBufferInfo) {
 						atomic.AddInt64(&mixer.inBytes, int64(len(samples)*2))
 						if int(info.SampleRate) != s.resamp.inRate { s.resamp = NewResampler(int(info.SampleRate), SampleRate, Channels) }
 						res := s.resamp.Resample(samples)
-						if res != nil { s.Push(res, info.SessionBeatTime, info.Tempo) }
+						if res != nil { s.Push(res, info.SessionBeatTime) }
 						s.lastSeen = time.Now()
 					})
 					mixer.Channels[id] = newStrip
@@ -353,7 +385,7 @@ func main() {
 	go func() {
 		ticker := time.NewTicker(time.Duration(float64(FrameSize)/float64(SampleRate)*1000) * time.Millisecond)
 		for range ticker.C {
-			pcm, rawChannels := mixer.Process(FrameSize)
+			pcm, rawChannels, startBeat := mixer.Process(FrameSize)
 			mixer.streamMu.Lock()
 			if mixer.streaming && mixer.streamConn != nil { 
 				if err := mixer.streamEnc.Write(mixer.streamConn, pcm); err == nil {
@@ -363,7 +395,8 @@ func main() {
 			mixer.streamMu.Unlock()
 			if hub.hasMonitor() {
 				buf := new(bytes.Buffer)
-				binary.Write(buf, binary.LittleEndian, uint32(1)) 
+				binary.Write(buf, binary.LittleEndian, uint32(1)) // Type 1: Audio
+				binary.Write(buf, binary.LittleEndian, float64(startBeat)) // Packet Musical Start Time
 				binary.Write(buf, binary.LittleEndian, uint32(len(rawChannels)))
 				for id, samples := range rawChannels {
 					var rawID uint64
@@ -421,7 +454,7 @@ func (h *Hub) run(m *Mixer) {
 			}
 			m.streamMu.Unlock()
 			mb := new(bytes.Buffer)
-			binary.Write(mb, binary.LittleEndian, uint32(2)) 
+			binary.Write(mb, binary.LittleEndian, uint32(2)) // Type 2: Meters
 			binary.Write(mb, binary.LittleEndian, uint32(len(m.Channels)+1))
 			binary.Write(mb, binary.LittleEndian, uint64(0)) 
 			binary.Write(mb, binary.LittleEndian, float32(m.MasterPeak))
