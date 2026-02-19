@@ -163,15 +163,12 @@ func (cs *ChannelStrip) Push(samples []int16) {
 func (cs *ChannelStrip) Pop(count int, latencyOffsetSamples int) []int16 {
 	cs.mu.Lock()
 	defer cs.mu.Unlock()
-	
 	baselineSamples := (SampleRate * Channels) / 2
 	readIdx := baselineSamples + latencyOffsetSamples
 	safetySamples := (SampleRate * Channels) / 20 
-	
 	if len(cs.buffer) < readIdx + count + safetySamples {
 		return make([]int16, count)
 	}
-	
 	out := make([]int16, count)
 	copy(out, cs.buffer[readIdx:readIdx+count])
 	cs.buffer = cs.buffer[count:]
@@ -223,25 +220,19 @@ func (m *Mixer) StopStream() {
 	m.streaming = false
 }
 
-// Process returns the mixed stereo PCM and a map of raw channel buffers for monitoring
 func (m *Mixer) Process(frameCount int) ([]int16, map[string][]int16) {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
-	
 	latencySamples := (m.LatencyMs * SampleRate * Channels) / 1000
 	latencySamples = (latencySamples / 2) * 2
-
 	mixL, mixR := make([]float64, frameCount), make([]float64, frameCount)
 	rawChannels := make(map[string][]int16)
-	
 	anySolo := false
 	for _, ch := range m.Channels { if ch.active && ch.Soloed { anySolo = true; break } }
-	
 	for id, ch := range m.Channels {
 		if !ch.active { continue }
 		input := ch.Pop(frameCount * 2, latencySamples)
-		rawChannels[id] = input // for monitor
-		
+		rawChannels[id] = input
 		var peak float64
 		for _, s := range input {
 			abs := math.Abs(float64(s))
@@ -249,15 +240,12 @@ func (m *Mixer) Process(frameCount int) ([]int16, map[string][]int16) {
 		}
 		p := peak / 32768.0
 		if p > ch.PeakHold { ch.PeakHold = p }
-		
 		if ch.Muted || (anySolo && !ch.Soloed) { continue }
-		
 		for i := 0; i < frameCount; i++ {
 			mixL[i] += float64(input[i*2]) * ch.Volume
 			mixR[i] += float64(input[i*2+1]) * ch.Volume
 		}
 	}
-	
 	out := make([]int16, frameCount*2)
 	mVol := m.MasterVolume
 	if m.MasterMuted { mVol = 0 }
@@ -274,25 +262,22 @@ func (m *Mixer) Process(frameCount int) ([]int16, map[string][]int16) {
 	return out, rawChannels
 }
 
-// -- Main --
+var upgrader = websocket.Upgrader{
+	CheckOrigin: func(r *http.Request) bool { return true },
+}
 
 func main() {
 	port := flag.Int("port", 8080, "Web port")
 	flag.Parse()
 	setRealtimePriority()
-	
 	link := abletonlink.NewLinkWithName(120.0, "WebMixer")
 	defer link.Destroy()
-	
 	link.SetNumPeersCallback(func(n uint64) { log.Printf("[Link] Peers: %d", n) })
 	link.Enable(true); link.EnableAudio(true); link.EnableStartStopSync(true)
-	
 	dummySink := link.NewSink("WebMixer", 16384)
 	defer dummySink.Destroy()
-
 	mixer := &Mixer{MasterVolume: 1.0, Channels: make(map[string]*ChannelStrip), Link: link}
 	hub := newHub()
-	
 	go func() {
 		for {
 			channels := link.Channels()
@@ -326,18 +311,14 @@ func main() {
 			time.Sleep(time.Second)
 		}
 	}()
-	
 	go func() {
 		ticker := time.NewTicker(time.Duration(float64(FrameSize)/float64(SampleRate)*1000) * time.Millisecond)
 		for range ticker.C {
 			pcm, rawChannels := mixer.Process(FrameSize)
-			
 			mixer.streamMu.Lock()
 			if mixer.streaming && mixer.streamConn != nil { mixer.streamEnc.Write(mixer.streamConn, pcm) }
 			mixer.streamMu.Unlock()
-			
 			if hub.hasMonitor() {
-				// Protocol: [Uint32: NumBundles] (Bundle: [8 bytes ID] [Uint32: NumSamples] [F32 Samples])
 				buf := new(bytes.Buffer)
 				binary.Write(buf, binary.LittleEndian, uint32(len(rawChannels)))
 				for id, samples := range rawChannels {
@@ -353,11 +334,10 @@ func main() {
 			}
 		}
 	}()
-	
 	go hub.run(mixer)
 	http.Handle("/", http.FileServer(http.FS(content)))
 	http.HandleFunc("/ws", func(w http.ResponseWriter, r *http.Request) { serveWs(hub, mixer, w, r) })
-	log.Printf("Listening on http://localhost:%d", *port)
+	log.Printf("Listening on :%d", *port)
 	log.Fatal(http.ListenAndServe(fmt.Sprintf(":%d", *port), nil))
 }
 
@@ -429,7 +409,7 @@ func serveWs(h *Hub, m *Mixer, w http.ResponseWriter, r *http.Request) {
 					var cmd BoolCmd
 					if json.Unmarshal(msg.Data, &cmd) == nil {
 						m.mu.Lock()
-						if cmd.ID == "master" { m.MasterMuted = cmd.Value } else if ch, ok := m.Channels[cmd.ID]; ok { m.Muted = cmd.Value }
+						if cmd.ID == "master" { m.MasterMuted = cmd.Value } else if ch, ok := m.Channels[cmd.ID]; ok { ch.Muted = cmd.Value }
 						m.mu.Unlock()
 					}
 				case "solo":
