@@ -3,6 +3,7 @@ package main
 import (
 	"bufio"
 	"encoding/base64"
+	"flag"
 	"fmt"
 	"io"
 	"math"
@@ -22,17 +23,19 @@ import (
 	"github.com/braheezy/shine-mp3/pkg/mp3"
 )
 
-const AppVersion = "1.2.2-initial-metadata"
+const AppVersion = "1.3.0-flags"
 
 type IcecastConfig struct {
-	Host        string
-	Port        int
-	Mount       string
-	Password    string
-	User        string
-	Bitrate     int
-	Name        string
-	Description string
+	Host           string
+	Port           int
+	Mount          string
+	Password       string
+	User           string
+	Bitrate        int
+	Name           string
+	Description    string
+	ChannelPattern string
+	StartTransport bool
 }
 
 // Resampler handles linear resampling with state tracking
@@ -139,15 +142,38 @@ func updateMetadata(config IcecastConfig, status string) {
 }
 
 func main() {
+	var config IcecastConfig
+	var flagChannel string
+	var flagStart bool
+
+	flag.StringVar(&config.Host, "host", "", "Icecast host")
+	flag.IntVar(&config.Port, "port", 8000, "Icecast port")
+	flag.StringVar(&config.Mount, "mount", "link.mp3", "Icecast mount point")
+	flag.StringVar(&config.Password, "pass", "hackme", "Icecast password")
+	flag.StringVar(&config.User, "user", "source", "Icecast user")
+	flag.IntVar(&config.Bitrate, "bitrate", 128, "MP3 bitrate (kbps)")
+	flag.StringVar(&config.Name, "name", "icecast", "Station name")
+	flag.StringVar(&config.Description, "desc", "Live from Ableton Link Go", "Station description")
+	flag.StringVar(&flagChannel, "channel", "", "Channel index or name to select automatically")
+	flag.BoolVar(&flagStart, "start-transport", false, "Automatically start Link transport")
+	
+	flag.Parse()
+
 	fmt.Printf("=== Ableton Link to Icecast2 MP3 Streamer v%s ===\n", AppVersion)
-	fmt.Println("This tool streams Link audio channels to Icecast2 as MP3.")
-	fmt.Println()
+	
+	interactive := config.Host == ""
+	if interactive {
+		fmt.Println("No host provided, entering wizard mode...")
+		config = wizard()
+	} else {
+		config.ChannelPattern = flagChannel
+		config.StartTransport = flagStart
+		fmt.Printf("Running non-interactively. Host: %s, Mount: %s\n", config.Host, config.Mount)
+	}
 
 	if err := setRealtimePriority(); err != nil {
 		fmt.Fprintf(os.Stderr, "Warning: Failed to set real-time priority: %v\n", err)
 	}
-
-	config := wizard()
 
 	link := abletonlink.NewLink(120.0)
 	defer link.Destroy()
@@ -158,9 +184,8 @@ func main() {
 	dummySink := link.NewSink("LinkGo-Icecast", 2048)
 	defer dummySink.Destroy()
 
-	var currentBPM int64 = 120000 // Fixed point BPM * 1000
+	var currentBPM int64 = 120000 
 	
-	// Pre-start heartbeat to pump events
 	go func() {
 		state := abletonlink.NewSessionState()
 		defer state.Destroy()
@@ -188,6 +213,23 @@ loop:
 		default:
 			channels := link.Channels()
 			if len(channels) > 0 {
+				if config.ChannelPattern != "" {
+					if idx, err := strconv.Atoi(config.ChannelPattern); err == nil {
+						if idx >= 0 && idx < len(channels) {
+							selectedChannel = &channels[idx]
+							break loop
+						}
+					}
+					for i, ch := range channels {
+						if strings.Contains(strings.ToLower(ch.Name), strings.ToLower(config.ChannelPattern)) {
+							selectedChannel = &channels[i]
+							break loop
+						}
+					}
+					fmt.Printf("Channel pattern '%s' not matched. Falling back to interactive selection.\n", config.ChannelPattern)
+					config.ChannelPattern = "" 
+				}
+
 				printChannelTree(channels)
 				fmt.Printf("\nEnter channel index to stream (or 'r' to refresh): ")
 				input, _ := reader.ReadString('\n')
@@ -210,8 +252,15 @@ loop:
 	}
 
 	fmt.Printf("\nSelected channel: %s from %s\n", selectedChannel.Name, selectedChannel.PeerName)
-	fmt.Print("Start Link transport? [y/N]: ")
-	if start, _ := reader.ReadString('\n'); strings.ToLower(strings.TrimSpace(start)) == "y" {
+	
+	if interactive && !config.StartTransport {
+		fmt.Print("Start Link transport? [y/N]: ")
+		if start, _ := reader.ReadString('\n'); strings.ToLower(strings.TrimSpace(start)) == "y" {
+			config.StartTransport = true
+		}
+	}
+
+	if config.StartTransport {
 		state := abletonlink.NewSessionState()
 		link.CaptureAppSessionState(state)
 		state.SetIsPlaying(true, link.ClockMicros())
@@ -330,10 +379,8 @@ loop:
 	}
 	fmt.Println("Icecast connected successfully! Streaming...")
 
-	// START METADATA UPDATER NOW
 	go func() {
 		var lastReportedBPM float64
-		// Force initial update
 		bpm := float64(atomic.LoadInt64(&currentBPM)) / 1000.0
 		status := fmt.Sprintf("%s - %.2f BPM", config.Name, bpm)
 		updateMetadata(config, status)
@@ -443,7 +490,6 @@ func printChannelTree(channels []abletonlink.Channel) {
 		}{idx: i, name: ch.Name})
 	}
 
-	// Sort peers by name
 	sort.Slice(peerIDs, func(i, j int) bool {
 		return groups[peerIDs[i]].name < groups[peerIDs[j]].name
 	})
