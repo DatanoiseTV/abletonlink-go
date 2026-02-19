@@ -9,7 +9,8 @@ extern "C"
 {
   clink clink_create(double bpm, const char* name)
   {
-    return clink{reinterpret_cast<void *>(new ableton::LinkAudio(bpm, name ? name : "icecast"))};
+    const char* peer_name = (name && strlen(name) > 0) ? name : "icecast";
+    return clink{reinterpret_cast<void *>(new ableton::LinkAudio(bpm, peer_name))};
   }
 
   void clink_destroy(clink link)
