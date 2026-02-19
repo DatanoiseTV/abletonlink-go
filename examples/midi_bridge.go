@@ -31,7 +31,7 @@ const (
 // scheduledTransport represents a MIDI transport event scheduled for a specific time
 type scheduledTransport struct {
 	isPlaying     bool   // true for start/continue, false for stop
-	scheduleTime  uint64 // Link time when to send MIDI message
+	scheduleTime  int64  // Link time when to send MIDI message
 	isContinue    bool   // true for continue, false for start
 }
 
@@ -487,7 +487,7 @@ func (b *MIDILinkBridge) updateLinkTempo(bpm float64) {
 	// This is appropriate when MIDI is the master clock source
 	currentBeat := b.state.BeatAtTime(currentTime, defaultQuantum)
 	b.state.SetTempo(bpm, currentTime)
-	b.state.ForceBeatAtTime(currentBeat, uint64(currentTime), defaultQuantum)
+	b.state.ForceBeatAtTime(currentBeat, currentTime, defaultQuantum)
 	
 	b.link.CommitAppSessionState(b.state)
 	// Don't log - tempo change already logged above
@@ -509,7 +509,7 @@ func (b *MIDILinkBridge) updateLinkTempoWithPhaseAdjustment(bpm float64, clockTi
 	// Update Link tempo WITHOUT phase adjustment to avoid drift
 	currentBeat := b.state.BeatAtTime(currentTime, defaultQuantum)
 	b.state.SetTempo(bpm, currentTime)
-	b.state.ForceBeatAtTime(currentBeat, uint64(currentTime), defaultQuantum)
+	b.state.ForceBeatAtTime(currentBeat, currentTime, defaultQuantum)
 	
 	b.link.CommitAppSessionState(b.state)
 	
@@ -591,21 +591,21 @@ func (b *MIDILinkBridge) syncMIDITransportToLink(isPlaying bool, isContinue bool
 		// We need to use ForceBeatAtTime to ensure Link follows MIDI timing exactly
 		if !isContinue {
 			// MIDI Start - force Link to beat 0
-			b.state.SetIsPlaying(true, uint64(currentTime))
+			b.state.SetIsPlaying(true, currentTime)
 			// Force beat alignment - MIDI is master, Link must obey
-			b.state.ForceBeatAtTime(0.0, uint64(currentTime), defaultQuantum)
+			b.state.ForceBeatAtTime(0.0, currentTime, defaultQuantum)
 			b.logInfo("Link transport started from MIDI (start) - forced beat 0")
 		} else {
 			// MIDI Continue - preserve current beat position
 			currentBeat := b.state.BeatAtTime(currentTime, defaultQuantum)
-			b.state.SetIsPlaying(true, uint64(currentTime))
+			b.state.SetIsPlaying(true, currentTime)
 			// Force the current beat to maintain continuity
-			b.state.ForceBeatAtTime(currentBeat, uint64(currentTime), defaultQuantum)
+			b.state.ForceBeatAtTime(currentBeat, currentTime, defaultQuantum)
 			b.logInfo("Link transport continued from MIDI - forced beat %.2f", currentBeat)
 		}
 	} else {
 		// Stop Link transport immediately
-		b.state.SetIsPlaying(false, uint64(currentTime))
+		b.state.SetIsPlaying(false, currentTime)
 		b.logInfo("Link transport stopped from MIDI")
 	}
 	
@@ -613,12 +613,12 @@ func (b *MIDILinkBridge) syncMIDITransportToLink(isPlaying bool, isContinue bool
 }
 
 // ensurePhaseCoherentTransport ensures MIDI and Link maintain phase coherence during transport changes
-func (b *MIDILinkBridge) ensurePhaseCoherentTransport(isPlaying bool, scheduleTime uint64) {
+func (b *MIDILinkBridge) ensurePhaseCoherentTransport(isPlaying bool, scheduleTime int64) {
 	b.link.CaptureAppSessionState(b.state)
 	
 	if isPlaying {
 		// Calculate the beat at the scheduled start time
-		scheduledBeat := b.state.BeatAtTime(int64(scheduleTime), defaultQuantum)
+		scheduledBeat := b.state.BeatAtTime(scheduleTime, defaultQuantum)
 		
 		// Ensure the beat is aligned to a musically meaningful boundary
 		alignedBeat := float64(int(scheduledBeat)) // Align to beat boundary
@@ -655,14 +655,14 @@ func (b *MIDILinkBridge) updateLinkTransport(isPlaying bool) {
 			// When Link is master (not external sync), use cooperative beat alignment
 			if !b.externalSyncEnabled {
 				// Set transport to start at the scheduled time
-				b.state.SetIsPlaying(true, uint64(nextHalfBarTime))
+				b.state.SetIsPlaying(true, nextHalfBarTime)
 				// Request that the beat aligns properly when transport starts
 				b.state.RequestBeatAtStartPlayingTime(nextHalfBar, halfBarQuantum)
 				b.logInfo("Link transport start quantized to beat %.1f at time %d with aligned beat grid", nextHalfBar, nextHalfBarTime)
 			} else {
 				// In external sync mode, this shouldn't be called but if it is, use forceful approach
-				b.state.SetIsPlaying(true, uint64(nextHalfBarTime))
-				b.state.ForceBeatAtTime(nextHalfBar, uint64(nextHalfBarTime), halfBarQuantum)
+				b.state.SetIsPlaying(true, nextHalfBarTime)
+				b.state.ForceBeatAtTime(nextHalfBar, nextHalfBarTime, halfBarQuantum)
 				b.logInfo("Link transport start forced to beat %.1f at time %d (external sync)", nextHalfBar, nextHalfBarTime)
 			}
 			
@@ -671,7 +671,7 @@ func (b *MIDILinkBridge) updateLinkTransport(isPlaying bool) {
 			wasPreviouslyPlaying := b.linkIsPlaying
 			b.scheduledMIDIStart = &scheduledTransport{
 				isPlaying:    true,
-				scheduleTime: uint64(nextHalfBarTime),
+				scheduleTime: nextHalfBarTime,
 				isContinue:   wasPreviouslyPlaying,
 			}
 			b.scheduledMIDIStop = nil // Clear any pending stop
@@ -683,16 +683,16 @@ func (b *MIDILinkBridge) updateLinkTransport(isPlaying bool) {
 						return "Continue"
 					}
 					return "Start"
-				}(), nextHalfBarTime, float64(int64(nextHalfBarTime)-int64(currentTime))/1000.0)
+				}(), nextHalfBarTime, float64(nextHalfBarTime-currentTime)/1000.0)
 		} else {
 			// Stop immediately (no quantization for stop)
-			b.state.SetIsPlaying(isPlaying, uint64(currentTime))
+			b.state.SetIsPlaying(isPlaying, currentTime)
 			
 			// Schedule immediate MIDI stop
 			b.mu.Lock()
 			b.scheduledMIDIStop = &scheduledTransport{
 				isPlaying:    false,
-				scheduleTime: uint64(currentTime),
+				scheduleTime: currentTime,
 				isContinue:   false,
 			}
 			b.scheduledMIDIStart = nil // Clear any pending start
@@ -701,7 +701,7 @@ func (b *MIDILinkBridge) updateLinkTransport(isPlaying bool) {
 			b.logInfo("Scheduled MIDI Stop for immediate delivery")
 		}
 	} else {
-		b.state.SetIsPlaying(isPlaying, uint64(currentTime))
+		b.state.SetIsPlaying(isPlaying, currentTime)
 		
 		// Schedule immediate MIDI message
 		b.mu.Lock()
@@ -709,14 +709,14 @@ func (b *MIDILinkBridge) updateLinkTransport(isPlaying bool) {
 			wasPreviouslyPlaying := b.linkIsPlaying
 			b.scheduledMIDIStart = &scheduledTransport{
 				isPlaying:    true,
-				scheduleTime: uint64(currentTime),
+				scheduleTime: currentTime,
 				isContinue:   wasPreviouslyPlaying,
 			}
 			b.scheduledMIDIStop = nil
 		} else {
 			b.scheduledMIDIStop = &scheduledTransport{
 				isPlaying:    false,
-				scheduleTime: uint64(currentTime),
+				scheduleTime: currentTime,
 				isContinue:   false,
 			}
 			b.scheduledMIDIStart = nil
@@ -738,11 +738,11 @@ func (b *MIDILinkBridge) scheduleLinkTransportChange(isPlaying bool) {
 	if b.quantizeToBar && isPlaying {
 		// Check if Link has already scheduled a quantized transport start
 		// This gives us more accurate timing information
-		transportTime := b.state.TimeForIsPlaying()
+		transportTime := int64(b.state.TimeForIsPlaying())
 		
-		if transportTime > uint64(currentTime) {
+		if transportTime > currentTime {
 			// Link has a future transport start scheduled, use that timing
-			scheduledBeat := b.state.BeatAtTime(int64(transportTime), defaultQuantum)
+			scheduledBeat := b.state.BeatAtTime(transportTime, defaultQuantum)
 			
 			wasPreviouslyPlaying := b.linkIsPlaying
 			b.scheduledMIDIStart = &scheduledTransport{
@@ -758,7 +758,7 @@ func (b *MIDILinkBridge) scheduleLinkTransportChange(isPlaying bool) {
 						return "Continue"
 					}
 					return "Start"
-				}(), scheduledBeat, transportTime, float64(int64(transportTime)-currentTime)/1000.0)
+				}(), scheduledBeat, transportTime, float64(transportTime-currentTime)/1000.0)
 		} else {
 			// No future transport scheduled, quantize ourselves
 			quantum := defaultQuantum * float64(b.beatsPerBar)
@@ -771,7 +771,7 @@ func (b *MIDILinkBridge) scheduleLinkTransportChange(isPlaying bool) {
 			wasPreviouslyPlaying := b.linkIsPlaying
 			b.scheduledMIDIStart = &scheduledTransport{
 				isPlaying:    true,
-				scheduleTime: uint64(targetTime),
+				scheduleTime: targetTime,
 				isContinue:   wasPreviouslyPlaying,
 			}
 			b.scheduledMIDIStop = nil
@@ -782,14 +782,14 @@ func (b *MIDILinkBridge) scheduleLinkTransportChange(isPlaying bool) {
 						return "Continue"
 					}
 					return "Start"
-				}(), nextHalfBar, targetTime, float64(int64(targetTime)-currentTime)/1000.0)
+				}(), nextHalfBar, targetTime, float64(targetTime-currentTime)/1000.0)
 		}
 	} else if isPlaying {
 		// Immediate start (no quantization)
 		wasPreviouslyPlaying := b.linkIsPlaying
 		b.scheduledMIDIStart = &scheduledTransport{
 			isPlaying:    true,
-			scheduleTime: uint64(currentTime),
+			scheduleTime: currentTime,
 			isContinue:   wasPreviouslyPlaying,
 		}
 		b.scheduledMIDIStop = nil
@@ -804,7 +804,7 @@ func (b *MIDILinkBridge) scheduleLinkTransportChange(isPlaying bool) {
 		// Stop immediately (no quantization for stop)
 		b.scheduledMIDIStop = &scheduledTransport{
 			isPlaying:    false,
-			scheduleTime: uint64(currentTime),
+			scheduleTime: currentTime,
 			isContinue:   false,
 		}
 		b.scheduledMIDIStart = nil // Clear any pending start
@@ -822,7 +822,7 @@ func (b *MIDILinkBridge) midiClockSender() {
 	
 	var nextClockBeat float64 = 0
 	var lastLinkPlaying bool = false
-	var lastTransportTime uint64 = 0
+	var lastTransportTime int64 = 0
 	
 	// High-frequency loop for precise timing (similar to audio callback)
 	ticker := time.NewTicker(time.Millisecond * 1) // 1ms precision
@@ -838,7 +838,7 @@ func (b *MIDILinkBridge) midiClockSender() {
 			b.link.CaptureAppSessionState(b.state)
 			
 			isPlaying := b.state.IsPlaying()
-			transportTime := b.state.TimeForIsPlaying()
+			transportTime := int64(b.state.TimeForIsPlaying())
 			
 			// Only detect and respond to Link transport changes when NOT in external sync mode
 			// In external sync mode, MIDI is the master and controls Link
@@ -846,7 +846,7 @@ func (b *MIDILinkBridge) midiClockSender() {
 				// Detect Link transport changes from external sources (other Link apps)
 				if isPlaying != lastLinkPlaying || (transportTime != lastTransportTime && transportTime > lastTransportTime) {
 					// Calculate timing difference for precise scheduling
-					timeDiff := int64(transportTime) - int64(currentTime)
+					timeDiff := transportTime - currentTime
 					
 					if isPlaying && !lastLinkPlaying {
 						// Link started from external source
@@ -881,12 +881,12 @@ func (b *MIDILinkBridge) midiClockSender() {
 			b.linkIsPlaying = isPlaying
 			
 			// Check for scheduled MIDI stop messages
-			if b.scheduledMIDIStop != nil && uint64(currentTime) >= b.scheduledMIDIStop.scheduleTime {
+			if b.scheduledMIDIStop != nil && currentTime >= b.scheduledMIDIStop.scheduleTime {
 				msg := []byte{0xFC} // Stop
 				if err := b.midiOut.SendMessage(msg); err != nil {
 					log.Printf("Failed to send scheduled MIDI Stop: %v", err)
 				} else {
-					timeDiff := int64(currentTime) - int64(b.scheduledMIDIStop.scheduleTime)
+					timeDiff := currentTime - b.scheduledMIDIStop.scheduleTime
 					b.logInfo("MIDI transport sent: Stop at time %d (scheduled: %d, diff: %.1f ms)", 
 						currentTime, b.scheduledMIDIStop.scheduleTime, float64(timeDiff)/1000.0)
 				}
@@ -894,7 +894,7 @@ func (b *MIDILinkBridge) midiClockSender() {
 			}
 			
 			// Check for scheduled MIDI start/continue messages
-			if b.scheduledMIDIStart != nil && uint64(currentTime) >= b.scheduledMIDIStart.scheduleTime {
+			if b.scheduledMIDIStart != nil && currentTime >= b.scheduledMIDIStart.scheduleTime {
 				var msg []byte
 				var msgType string
 				
@@ -906,7 +906,7 @@ func (b *MIDILinkBridge) midiClockSender() {
 					msgType = "Start"
 					
 					// Get the exact beat at transport start time for phase-coherent alignment
-					startBeat := b.state.BeatAtTime(int64(b.scheduledMIDIStart.scheduleTime), midiClockQuantum)
+					startBeat := b.state.BeatAtTime(b.scheduledMIDIStart.scheduleTime, midiClockQuantum)
 					
 					// Align MIDI clock to the nearest clock boundary
 					// This ensures MIDI clock phase matches Link beat phase
@@ -918,7 +918,7 @@ func (b *MIDILinkBridge) midiClockSender() {
 				if err := b.midiOut.SendMessage(msg); err != nil {
 					log.Printf("Failed to send scheduled MIDI %s: %v", msgType, err)
 				} else {
-					timeDiff := int64(currentTime) - int64(b.scheduledMIDIStart.scheduleTime)
+					timeDiff := currentTime - b.scheduledMIDIStart.scheduleTime
 					b.logInfo("MIDI transport sent: %s at time %d (scheduled: %d, diff: %.1f ms)", 
 						msgType, currentTime, b.scheduledMIDIStart.scheduleTime, float64(timeDiff)/1000.0)
 				}
@@ -1079,7 +1079,7 @@ func (b *MIDILinkBridge) toggleTransport() {
 		// In Link master mode, control Link transport directly
 		if isPlaying {
 			// Stop transport
-			b.state.SetIsPlaying(false, uint64(currentTime))
+			b.state.SetIsPlaying(false, currentTime)
 			b.logInfo("Transport stopped via spacebar")
 		} else {
 			// Start transport
@@ -1090,7 +1090,7 @@ func (b *MIDILinkBridge) toggleTransport() {
 				return // updateLinkTransport handles the commit
 			} else {
 				// Immediate start
-				b.state.SetIsPlaying(true, uint64(currentTime))
+				b.state.SetIsPlaying(true, currentTime)
 				b.logInfo("Transport started via spacebar")
 			}
 		}
