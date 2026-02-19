@@ -11,6 +11,7 @@ Go bindings for [Ableton Link](https://github.com/Ableton/link), a technology th
 ## Features
 
 - Complete Go API coverage of Ableton Link functionality
+- **Link Audio support** for sharing audio channels across the network
 - Automatic build system with included C library as git submodule
 - Thread-safe operations with separate audio/application thread contexts
 - Callback support for tempo, peer count, and transport state changes
@@ -196,6 +197,29 @@ state.SetIsPlayingAndRequestBeatAtTime(isPlaying bool, time uint64, beat float64
 link.SetNumPeersCallback(func(uint64))    // Peer count changes
 link.SetTempoCallback(func(float64))      // Tempo changes
 link.SetStartStopCallback(func(bool))     // Transport state changes
+link.SetChannelsChangedCallback(func())   // Audio channels updated
+```
+
+### Audio Support
+
+```go
+// Enable audio sharing
+link.EnableAudio(true)
+link.IsAudioEnabled() bool
+
+// Channel discovery
+link.Channels() []Channel
+
+// Creating a Sink (sending audio)
+sink := link.NewSink(name string, maxSamples uint64)
+buffer := sink.RetainBuffer()
+// ... fill buffer.Samples ...
+sink.Commit(buffer, state, beats, quantum, frames, channels, rate)
+
+// Creating a Source (receiving audio)
+source := link.NewSource(channelID, func(samples []int16, info SourceBufferInfo) {
+    // Process incoming samples
+})
 ```
 
 ## Thread Safety
@@ -236,6 +260,22 @@ Features:
 - Transport sync (start/stop/continue) with bar quantization
 - Real-time MIDI clock generation based on Link tempo
 - Compatible with DAWs, hardware sequencers, and MIDI applications
+
+### Icecast2 Streamer
+Streams Link audio channels to an Icecast2 server as MP3:
+
+```bash
+cd examples/icecast_stream
+./build.sh
+./icecast_stream
+```
+
+Features:
+- Auto-discovery of Link audio channels
+- Real-time MP3 encoding (128kbps)
+- Live level meter and buffer status
+- Dynamic Icecast metadata updates (BPM and station info)
+- Built-in resampler for any input rate (44.1kHz -> 48kHz)
 
 See `examples/README.md` for detailed usage instructions.
 
