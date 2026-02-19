@@ -91,6 +91,15 @@ type MixerState struct {
 	Peers     uint64         `json:"peers"`
 	Master    ChannelState   `json:"master"`
 	Channels  []ChannelState `json:"channels"`
+	Debug     DebugStats     `json:"debug"`
+}
+
+type DebugStats struct {
+	InRate      float64        `json:"in_rate_kbps"`
+	OutRate     float64        `json:"out_rate_kbps"`
+	IceRate     float64        `json:"ice_rate_kbps"`
+	LoadPercent float64        `json:"load_percent"`
+	BufferDepth map[string]int `json:"buffer_depth"`
 }
 
 type ChannelState struct {
@@ -187,6 +196,11 @@ type Mixer struct {
 	streamConn   net.Conn
 	streamEnc    *mp3.Encoder
 	streamMu     sync.Mutex
+
+	// Stats
+	inBytes      int64
+	iceBytes     int64
+	procTime     int64 // nanoseconds
 }
 
 func (m *Mixer) StartStream(cfg StreamConfig) error {
@@ -221,6 +235,7 @@ func (m *Mixer) StopStream() {
 }
 
 func (m *Mixer) Process(frameCount int) ([]int16, map[string][]int16) {
+	start := time.Now()
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 	latencySamples := (m.LatencyMs * SampleRate * Channels) / 1000
@@ -259,6 +274,7 @@ func (m *Mixer) Process(frameCount int) ([]int16, map[string][]int16) {
 		if math.Abs(r) > mp { mp = math.Abs(r) }
 	}
 	m.MasterPeak = mp / 32768.0
+	atomic.AddInt64(&m.procTime, int64(time.Since(start)))
 	return out, rawChannels
 }
 
@@ -292,6 +308,7 @@ func main() {
 					newStrip.resamp = NewResampler(48000, SampleRate, Channels)
 					s := newStrip
 					newStrip.source = link.NewSource(ch.ID, func(samples []int16, info abletonlink.SourceBufferInfo) {
+						atomic.AddInt64(&mixer.inBytes, int64(len(samples)*2))
 						if int(info.SampleRate) != s.resamp.inRate { s.resamp = NewResampler(int(info.SampleRate), SampleRate, Channels) }
 						res := s.resamp.Resample(samples)
 						if res != nil { s.Push(res) }
@@ -312,15 +329,19 @@ func main() {
 		}
 	}()
 	go func() {
-		ticker := time.NewTicker(time.Duration(float64(FrameSize)/float64(SampleRate)*1000) * time.Millisecond)
+		frameDuration := time.Duration(float64(FrameSize)/float64(SampleRate)*1000) * time.Millisecond
+		ticker := time.NewTicker(frameDuration)
 		for range ticker.C {
 			pcm, rawChannels := mixer.Process(FrameSize)
 			mixer.streamMu.Lock()
-			if mixer.streaming && mixer.streamConn != nil { mixer.streamEnc.Write(mixer.streamConn, pcm) }
+			if mixer.streaming && mixer.streamConn != nil { 
+				n, _ := mixer.streamEnc.Write(mixer.streamConn, pcm)
+				atomic.AddInt64(&mixer.iceBytes, int64(n))
+			}
 			mixer.streamMu.Unlock()
 			if hub.hasMonitor() {
 				buf := new(bytes.Buffer)
-				binary.Write(buf, binary.LittleEndian, uint32(1)) // Type 1: Audio (4 bytes for alignment)
+				binary.Write(buf, binary.LittleEndian, uint32(1)) 
 				binary.Write(buf, binary.LittleEndian, uint32(len(rawChannels)))
 				for id, samples := range rawChannels {
 					var rawID uint64
@@ -331,7 +352,9 @@ func main() {
 					for i, s := range samples { f32[i] = float32(s) / 32768.0 }
 					binary.Write(buf, binary.LittleEndian, f32)
 				}
-				hub.broadcastBinary(buf.Bytes(), true)
+				data := buf.Bytes()
+				atomic.AddInt64(&hub.outBytes, int64(len(data)))
+				hub.broadcastBinary(data, true)
 			}
 		}
 	}()
@@ -342,12 +365,11 @@ func main() {
 	log.Fatal(http.ListenAndServe(fmt.Sprintf(":%d", *port), nil))
 }
 
-// -- Hub --
-
 type Hub struct {
 	clients map[*Client]bool
 	register, unregister chan *Client
 	monCount int32
+	outBytes int64
 }
 
 func newHub() *Hub { return &Hub{clients: make(map[*Client]bool), register: make(chan *Client), unregister: make(chan *Client)} }
@@ -356,7 +378,7 @@ func (h *Hub) broadcastBinary(d []byte, monOnly bool) {
 	for c := range h.clients { if !monOnly || c.mon { select { case c.send <- d: default: } } }
 }
 func (h *Hub) run(m *Mixer) {
-	ticker := time.NewTicker(100 * time.Millisecond)
+	ticker := time.NewTicker(1000 * time.Millisecond) // Stats every second
 	for {
 		select {
 		case c := <-h.register: h.clients[c] = true
@@ -366,30 +388,37 @@ func (h *Hub) run(m *Mixer) {
 				delete(h.clients, c); close(c.send)
 			}
 		case <-ticker.C:
+			// Calculate rates
+			inRate := float64(atomic.SwapInt64(&m.inBytes, 0)) * 8 / 1024
+			outRate := float64(atomic.SwapInt64(&h.outBytes, 0)) * 8 / 1024
+			iceRate := float64(atomic.SwapInt64(&m.iceBytes, 0)) * 8 / 1024
+			load := float64(atomic.SwapInt64(&m.procTime, 0)) / float64(time.Second) * 100
+
 			st := abletonlink.NewSessionState(); m.Link.CaptureAppSessionState(st)
 			bpm, playing := st.Tempo(), st.IsPlaying(); st.Destroy()
 			m.mu.RLock(); m.streamMu.Lock()
-			msg := MixerState{BPM: bpm, Playing: playing, Streaming: m.streaming, Peers: m.Link.NumPeers(), Master: ChannelState{Volume: m.MasterVolume, Muted: m.MasterMuted}, Channels: []ChannelState{}}
+			msg := MixerState{
+				BPM: bpm, Playing: playing, Streaming: m.streaming, Peers: m.Link.NumPeers(), 
+				Master: ChannelState{Volume: m.MasterVolume, Muted: m.MasterMuted}, 
+				Channels: []ChannelState{},
+				Debug: DebugStats{
+					InRate: inRate, OutRate: outRate, IceRate: iceRate, LoadPercent: load,
+					BufferDepth: make(map[string]int),
+				},
+			}
 			m.streamMu.Unlock()
-			
-			mb := new(bytes.Buffer)
-			binary.Write(mb, binary.LittleEndian, uint32(2)) // Type 2: Meters
-			binary.Write(mb, binary.LittleEndian, uint32(len(m.Channels)+1))
-			binary.Write(mb, binary.LittleEndian, uint64(0)) // Master ID
-			binary.Write(mb, binary.LittleEndian, float32(m.MasterPeak))
-			for _, ch := range m.Channels {
+			mets := make(map[string]float64); mets["master"] = m.MasterPeak
+			for id, ch := range m.Channels {
 				msg.Channels = append(msg.Channels, ChannelState{ID: ch.ID, Name: ch.Name, PeerName: ch.PeerName, Volume: ch.Volume, Muted: ch.Muted, Soloed: ch.Soloed})
-				var rawID uint64
-				fmt.Sscanf(ch.ID, "%d", &rawID)
-				binary.Write(mb, binary.LittleEndian, rawID)
-				binary.Write(mb, binary.LittleEndian, float32(ch.PeakHold))
-				ch.PeakHold = 0
+				mets[ch.ID] = ch.PeakHold; ch.PeakHold = 0
+				msg.Debug.BufferDepth[id] = len(ch.buffer)
 			}
 			m.mu.RUnlock()
 			sort.Slice(msg.Channels, func(i, j int) bool { return msg.Channels[i].Name < msg.Channels[j].Name })
 			bS, _ := json.Marshal(WSMessage{Type: "state", Data: mustMarshal(msg)})
-			h.broadcastBinary(mb.Bytes(), false)
-			for c := range h.clients { select { case c.send <- bS: default: } }
+			bM, _ := json.Marshal(WSMessage{Type: "meters", Data: mustMarshal(mets)})
+			atomic.AddInt64(&h.outBytes, int64(len(bS)+len(bM)))
+			for c := range h.clients { select { case c.send <- bS: default: } ; select { case c.send <- bM: default: } }
 		}
 	}
 }
@@ -412,22 +441,14 @@ func serveWs(h *Hub, m *Mixer, w http.ResponseWriter, r *http.Request) {
 					var cmd VolumeCmd
 					if json.Unmarshal(msg.Data, &cmd) == nil {
 						m.mu.Lock()
-						if cmd.ID == "master" {
-							m.MasterVolume = cmd.Value
-						} else if ch, ok := m.Channels[cmd.ID]; ok {
-							ch.Volume = cmd.Value
-						}
+						if cmd.ID == "master" { m.MasterVolume = cmd.Value } else if ch, ok := m.Channels[cmd.ID]; ok { ch.Volume = cmd.Value }
 						m.mu.Unlock()
 					}
 				case "mute":
 					var cmd BoolCmd
 					if json.Unmarshal(msg.Data, &cmd) == nil {
 						m.mu.Lock()
-						if cmd.ID == "master" {
-							m.MasterMuted = cmd.Value
-						} else if ch, ok := m.Channels[cmd.ID]; ok {
-							ch.Muted = cmd.Value
-						}
+						if cmd.ID == "master" { m.MasterMuted = cmd.Value } else if ch, ok := m.Channels[cmd.ID]; ok { m.Muted = cmd.Value }
 						m.mu.Unlock()
 					}
 				case "solo":
