@@ -46,7 +46,7 @@ func NewResampler(inRate, outRate, channels int) *Resampler {
 	return &Resampler{
 		ratio:    float64(inRate) / float64(outRate),
 		channels: channels,
-		pending:  make([]int16, 0, 4096),
+		pending:  make([]int16, 0, 8192),
 		inRate:   inRate,
 	}
 }
@@ -120,6 +120,10 @@ type MonitorCmd struct {
 	Enabled bool `json:"enabled"`
 }
 
+type LatencyCmd struct {
+	Value int `json:"value"`
+}
+
 type StreamConfig struct {
 	Host  string `json:"host"`
 	Port  int    `json:"port"`
@@ -134,44 +138,47 @@ type ChannelStrip struct {
 	ID       string
 	Name     string
 	PeerName string
-	
-	buffer      []int16
-	mu          sync.Mutex
-	
-	Volume      float64
-	Muted       bool
-	Soloed      bool
-	
-	PeakHold    float64
-	
-	source      *abletonlink.Source
-	resamp      *Resampler
-	lastSeen    time.Time
-	active      bool
+	buffer   []int16
+	mu       sync.Mutex
+	Volume   float64
+	Muted    bool
+	Soloed   bool
+	PeakHold float64
+	source   *abletonlink.Source
+	resamp   *Resampler
+	lastSeen time.Time
+	active   bool
 }
 
 func (cs *ChannelStrip) Push(samples []int16) {
 	cs.mu.Lock()
 	defer cs.mu.Unlock()
-	// Unified sync: we keep a small buffer to handle network jitter
-	// but the mixer will pull them together.
-	if len(cs.buffer) > SampleRate*Channels/2 { // 500ms max buffer
+	// Large safety buffer to handle network jitter
+	if len(cs.buffer) > SampleRate*Channels*4 { // 2s max buffer
 		cs.buffer = cs.buffer[len(cs.buffer)/2:]
 	}
 	cs.buffer = append(cs.buffer, samples...)
 }
 
-func (cs *ChannelStrip) Pop(count int) []int16 {
+func (cs *ChannelStrip) Pop(count int, latencyOffsetSamples int) []int16 {
 	cs.mu.Lock()
 	defer cs.mu.Unlock()
-	if len(cs.buffer) < count {
-		out := make([]int16, count)
-		copy(out, cs.buffer)
-		cs.buffer = cs.buffer[:0]
-		return out
+	
+	// 500ms baseline delay to allow +/- 500ms compensation
+	baselineSamples := (SampleRate * Channels) / 2
+	readIdx := baselineSamples + latencyOffsetSamples
+	
+	// Jitter Buffer: Ensure we have enough data to fulfill the request + some safety
+	// If we have less than required, we return silence and let the buffer fill up.
+	safetySamples := (SampleRate * Channels) / 20 // 50ms safety margin
+	if len(cs.buffer) < readIdx + count + safetySamples {
+		return make([]int16, count)
 	}
+	
 	out := make([]int16, count)
-	copy(out, cs.buffer[:count])
+	copy(out, cs.buffer[readIdx:readIdx+count])
+	
+	// Move the buffer forward
 	cs.buffer = cs.buffer[count:]
 	return out
 }
@@ -180,16 +187,14 @@ type Mixer struct {
 	MasterVolume float64
 	MasterMuted  bool
 	MasterPeak   float64
-	
+	LatencyMs    int
 	Channels     map[string]*ChannelStrip
 	mu           sync.RWMutex
-	
-	Link *abletonlink.Link
-	
-	streaming     bool
-	streamConn    net.Conn
-	streamEnc     *mp3.Encoder
-	streamMu      sync.Mutex
+	Link         *abletonlink.Link
+	streaming    bool
+	streamConn   net.Conn
+	streamEnc    *mp3.Encoder
+	streamMu     sync.Mutex
 }
 
 func (m *Mixer) StartStream(cfg StreamConfig) error {
@@ -227,21 +232,16 @@ func (m *Mixer) Process(frameCount int) []int16 {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 	
-	mixL := make([]float64, frameCount)
-	mixR := make([]float64, frameCount)
-	
+	latencySamples := (m.LatencyMs * SampleRate * Channels) / 1000
+	latencySamples = (latencySamples / 2) * 2
+
+	mixL, mixR := make([]float64, frameCount), make([]float64, frameCount)
 	anySolo := false
-	for _, ch := range m.Channels { 
-		if ch.active && ch.Soloed { 
-			anySolo = true; break 
-		} 
-	}
+	for _, ch := range m.Channels { if ch.active && ch.Soloed { anySolo = true; break } }
 	
 	for _, ch := range m.Channels {
 		if !ch.active { continue }
-		
-		input := ch.Pop(frameCount * 2)
-		
+		input := ch.Pop(frameCount * 2, latencySamples)
 		var peak float64
 		for _, s := range input {
 			abs := math.Abs(float64(s))
@@ -249,22 +249,15 @@ func (m *Mixer) Process(frameCount int) []int16 {
 		}
 		p := peak / 32768.0
 		if p > ch.PeakHold { ch.PeakHold = p }
-		
-		if ch.Muted || (anySolo && !ch.Soloed) {
-			continue
-		}
-		
-		vol := ch.Volume
+		if ch.Muted || (anySolo && !ch.Soloed) { continue }
 		for i := 0; i < frameCount; i++ {
-			mixL[i] += float64(input[i*2]) * vol
-			mixR[i] += float64(input[i*2+1]) * vol
+			mixL[i] += float64(input[i*2]) * ch.Volume
+			mixR[i] += float64(input[i*2+1]) * ch.Volume
 		}
 	}
-	
 	out := make([]int16, frameCount*2)
 	mVol := m.MasterVolume
 	if m.MasterMuted { mVol = 0 }
-	
 	var mp float64
 	for i := 0; i < frameCount; i++ {
 		l, r := mixL[i]*mVol, mixR[i]*mVol
@@ -275,7 +268,6 @@ func (m *Mixer) Process(frameCount int) []int16 {
 		if math.Abs(r) > mp { mp = math.Abs(r) }
 	}
 	m.MasterPeak = mp / 32768.0
-	
 	return out
 }
 
@@ -292,80 +284,52 @@ func main() {
 	defer link.Destroy()
 	link.Enable(true); link.EnableAudio(true); link.EnableStartStopSync(true)
 	
-	dummySink := link.NewSink("WebMixer", 2048)
+	// Increased dummy sink buffer size for robustness
+	dummySink := link.NewSink("WebMixer", 16384)
 	defer dummySink.Destroy()
 
 	mixer := &Mixer{MasterVolume: 1.0, Channels: make(map[string]*ChannelStrip), Link: link}
 	hub := newHub()
 	
-	// Unified Discovery and Cleanup Loop
 	go func() {
 		for {
 			channels := link.Channels()
 			mixer.mu.Lock()
-			
-			// Mark current as seen
 			activeIDs := make(map[string]bool)
 			for _, ch := range channels {
 				id := fmt.Sprintf("%d", ch.ID)
 				activeIDs[id] = true
-				
 				if strip, ok := mixer.Channels[id]; !ok {
-					log.Printf("[Link] New channel: %s (Peer: %s)", ch.Name, ch.PeerName)
-					newStrip := &ChannelStrip{
-						ID: id, Name: ch.Name, PeerName: ch.PeerName, 
-						Volume: 0.8, buffer: make([]int16, 0, 8192),
-						active: true, lastSeen: time.Now(),
-					}
+					newStrip := &ChannelStrip{ID: id, Name: ch.Name, PeerName: ch.PeerName, Volume: 0.8, buffer: make([]int16, 0, 32768), active: true, lastSeen: time.Now()}
 					newStrip.resamp = NewResampler(48000, SampleRate, Channels)
-					
-					// Capture for closure
 					s := newStrip
 					newStrip.source = link.NewSource(ch.ID, func(samples []int16, info abletonlink.SourceBufferInfo) {
-						if int(info.SampleRate) != s.resamp.inRate { 
-							s.resamp = NewResampler(int(info.SampleRate), SampleRate, Channels) 
-						}
+						if int(info.SampleRate) != s.resamp.inRate { s.resamp = NewResampler(int(info.SampleRate), SampleRate, Channels) }
 						res := s.resamp.Resample(samples)
 						if res != nil { s.Push(res) }
 						s.lastSeen = time.Now()
 					})
 					mixer.Channels[id] = newStrip
-				} else {
-					strip.active = true
-				}
+				} else { strip.active = true }
 			}
-			
-			// Sweep: disable/remove channels not seen in current discovery
-			// We give them a small grace period of 2 seconds
 			for id, strip := range mixer.Channels {
 				if !activeIDs[id] {
 					if time.Since(strip.lastSeen) > 2*time.Second {
-						log.Printf("[Link] Removing channel: %s", strip.Name)
-						strip.source.Destroy()
-						delete(mixer.Channels, id)
-					} else {
-						strip.active = false
-					}
+						strip.source.Destroy(); delete(mixer.Channels, id)
+					} else { strip.active = false }
 				}
 			}
-			
 			mixer.mu.Unlock()
 			time.Sleep(time.Second)
 		}
 	}()
-	
-	// Audio Mixing Thread
 	go func() {
 		ticker := time.NewTicker(time.Duration(float64(FrameSize)/float64(SampleRate)*1000) * time.Millisecond)
 		for range ticker.C {
 			pcm := mixer.Process(FrameSize)
-			
 			mixer.streamMu.Lock()
-			if mixer.streaming && mixer.streamConn != nil { 
-				mixer.streamEnc.Write(mixer.streamConn, pcm) 
-			}
+			if mixer.streaming && mixer.streamConn != nil { mixer.streamEnc.Write(mixer.streamConn, pcm) }
 			mixer.streamMu.Unlock()
-			
 			if hub.hasMonitor() {
 				f32 := make([]float32, len(pcm))
 				for i, s := range pcm { f32[i] = float32(s) / 32768.0 }
@@ -374,17 +338,12 @@ func main() {
 			}
 		}
 	}()
-	
 	go hub.run(mixer)
-	
 	http.Handle("/", http.FileServer(http.FS(content)))
 	http.HandleFunc("/ws", func(w http.ResponseWriter, r *http.Request) { serveWs(hub, mixer, w, r) })
-	
 	log.Printf("Web Mixer Listening on http://localhost:%d", *port)
 	log.Fatal(http.ListenAndServe(fmt.Sprintf(":%d", *port), nil))
 }
-
-// -- Hub --
 
 type Hub struct {
 	clients map[*Client]bool
@@ -417,43 +376,24 @@ func (h *Hub) run(m *Mixer) {
 		case <-ticker.C:
 			st := abletonlink.NewSessionState(); m.Link.CaptureAppSessionState(st)
 			bpm, playing := st.Tempo(), st.IsPlaying(); st.Destroy()
-			
-			m.mu.RLock()
-			m.streamMu.Lock()
-			msg := MixerState{
-				BPM: bpm, Playing: playing, Streaming: m.streaming, 
-				Peers: m.Link.NumPeers(), 
-				Master: ChannelState{Volume: m.MasterVolume, Muted: m.MasterMuted}, 
-				Channels: []ChannelState{},
-			}
+			m.mu.RLock(); m.streamMu.Lock()
+			msg := MixerState{BPM: bpm, Playing: playing, Streaming: m.streaming, Peers: m.Link.NumPeers(), Master: ChannelState{Volume: m.MasterVolume, Muted: m.MasterMuted}, Channels: []ChannelState{}}
 			m.streamMu.Unlock()
-			
-			mets := make(map[string]float64)
-			mets["master"] = m.MasterPeak
-			
+			mets := make(map[string]float64); mets["master"] = m.MasterPeak
 			for _, ch := range m.Channels {
-				msg.Channels = append(msg.Channels, ChannelState{
-					ID: ch.ID, Name: ch.Name, PeerName: ch.PeerName, 
-					Volume: ch.Volume, Muted: ch.Muted, Soloed: ch.Soloed,
-				})
+				msg.Channels = append(msg.Channels, ChannelState{ID: ch.ID, Name: ch.Name, PeerName: ch.PeerName, Volume: ch.Volume, Muted: ch.Muted, Soloed: ch.Soloed})
 				mets[ch.ID] = ch.PeakHold; ch.PeakHold = 0
 			}
 			m.mu.RUnlock()
-			
 			sort.Slice(msg.Channels, func(i, j int) bool { return msg.Channels[i].Name < msg.Channels[j].Name })
-			
 			bS, _ := json.Marshal(WSMessage{Type: "state", Data: mustMarshal(msg)})
 			bM, _ := json.Marshal(WSMessage{Type: "meters", Data: mustMarshal(mets)})
-			for c := range h.clients {
-				select { case c.send <- bS: default: }
-				select { case c.send <- bM: default: }
-			}
+			for c := range h.clients { select { case c.send <- bS: default: }; select { case c.send <- bM: default: } }
 		}
 	}
 }
 
 func mustMarshal(v interface{}) []byte { b, _ := json.Marshal(v); return b }
-
 func serveWs(h *Hub, m *Mixer, w http.ResponseWriter, r *http.Request) {
 	conn, err := upgrader.Upgrade(w, r, nil)
 	if err != nil { return }
@@ -471,14 +411,22 @@ func serveWs(h *Hub, m *Mixer, w http.ResponseWriter, r *http.Request) {
 					var cmd VolumeCmd
 					if json.Unmarshal(msg.Data, &cmd) == nil {
 						m.mu.Lock()
-						if cmd.ID == "master" { m.MasterVolume = cmd.Value } else if ch, ok := m.Channels[cmd.ID]; ok { ch.Volume = cmd.Value }
+						if cmd.ID == "master" {
+							m.MasterVolume = cmd.Value
+						} else if ch, ok := m.Channels[cmd.ID]; ok {
+							ch.Volume = cmd.Value
+						}
 						m.mu.Unlock()
 					}
 				case "mute":
 					var cmd BoolCmd
 					if json.Unmarshal(msg.Data, &cmd) == nil {
 						m.mu.Lock()
-						if cmd.ID == "master" { m.MasterMuted = cmd.Value } else if ch, ok := m.Channels[cmd.ID]; ok { ch.Muted = cmd.Value }
+						if cmd.ID == "master" {
+							m.MasterMuted = cmd.Value
+						} else if ch, ok := m.Channels[cmd.ID]; ok {
+							ch.Muted = cmd.Value
+						}
 						m.mu.Unlock()
 					}
 				case "solo":
@@ -486,6 +434,13 @@ func serveWs(h *Hub, m *Mixer, w http.ResponseWriter, r *http.Request) {
 					if json.Unmarshal(msg.Data, &cmd) == nil {
 						m.mu.Lock()
 						if ch, ok := m.Channels[cmd.ID]; ok { ch.Soloed = cmd.Value }
+						m.mu.Unlock()
+					}
+				case "latency":
+					var cmd LatencyCmd
+					if json.Unmarshal(msg.Data, &cmd) == nil {
+						m.mu.Lock()
+						m.LatencyMs = cmd.Value
 						m.mu.Unlock()
 					}
 				case "transport":

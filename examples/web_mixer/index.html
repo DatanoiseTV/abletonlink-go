@@ -37,6 +37,9 @@
         .config-panel label { font-size: 8px; color: #666; display: block; margin-bottom: 2px; }
         #transport-btn { width: 100%; padding: 10px; font-size: 12px; margin-bottom: 10px; }
         #transport-btn.playing { background: #2ecc71; color: #000; }
+        .latency-control { width: 100%; margin-top: 15px; text-align: center; }
+        .latency-control input[type=range] { width: 100%; -webkit-appearance: none; background: #333; height: 4px; border-radius: 2px; outline: none; }
+        .latency-control input[type=range]::-webkit-slider-thumb { -webkit-appearance: none; width: 12px; height: 12px; background: #00bcd4; border-radius: 50%; cursor: pointer; }
     </style>
 </head>
 <body>
@@ -60,6 +63,12 @@
                     <div class="meter-bridge"><div class="meter-fill" id="meter-master"></div></div>
                     <input type="range" orient="vertical" min="0" max="1.5" step="0.01" id="vol-master" value="1.0">
                 </div>
+                
+                <div class="latency-control">
+                    <label style="font-size: 8px; color: #666; display: block; margin-bottom: 5px;">SYNC OFFSET: <span id="lat-val">0</span>ms</label>
+                    <input type="range" min="-500" max="500" step="1" id="lat-slider" value="0">
+                </div>
+
                 <div class="master-controls">
                     <button id="mon-btn" class="mon">MONITOR</button>
                     <button id="stream-btn" class="stream">STREAM</button>
@@ -87,6 +96,7 @@
                 pass: document.getElementById('ice-pass').value,
                 mount: document.getElementById('ice-mount').value,
                 masterVol: document.getElementById('vol-master').value,
+                latency: document.getElementById('lat-slider').value,
                 channels: {}
             };
             for (let id in channels) {
@@ -109,9 +119,11 @@
                 document.getElementById('ice-pass').value = config.pass || 'hackme';
                 document.getElementById('ice-mount').value = config.mount || 'link.mp3';
                 document.getElementById('vol-master').value = config.masterVol || 1.0;
+                document.getElementById('lat-slider').value = config.latency || 0;
+                document.getElementById('lat-val').textContent = document.getElementById('lat-slider').value;
                 localSettings = config.channels || {};
-                // Send master vol immediately if socket open
                 send('volume', { id: 'master', value: parseFloat(document.getElementById('vol-master').value) });
+                send('latency', { value: parseInt(document.getElementById('lat-slider').value) });
             }
         }
 
@@ -157,8 +169,7 @@
         };
 
         document.getElementById('stream-btn').onclick = () => {
-            const active = document.getElementById('stream-btn').classList.contains('active');
-            if (!active) {
+            if (!document.getElementById('stream-btn').classList.contains('active')) {
                 saveSettings();
                 send('start_stream', {
                     host: document.getElementById('ice-host').value,
@@ -168,6 +179,13 @@
                     mount: document.getElementById('ice-mount').value
                 });
             } else send('stop_stream', {});
+        };
+
+        document.getElementById('lat-slider').oninput = (e) => {
+            const val = parseInt(e.target.value);
+            document.getElementById('lat-val').textContent = val;
+            send('latency', { value: val });
+            saveSettings();
         };
 
         document.querySelectorAll('.config-panel input').forEach(el => el.onchange = saveSettings);
@@ -189,7 +207,6 @@
             s.channels.forEach(ch => {
                 if (!channels[ch.id]) {
                     createStrip(ch);
-                    // Apply saved settings for new channel if exists
                     if (localSettings[ch.id]) {
                         const s = localSettings[ch.id];
                         send('volume', { id: ch.id, value: parseFloat(s.vol) });
