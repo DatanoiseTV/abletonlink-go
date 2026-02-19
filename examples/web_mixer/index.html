@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Link Web Mixer</title>
+    <title>Link Mixer</title>
     <style>
         body { font-family: "SF Mono", "Monaco", "Inconsolata", monospace; background: #121212; color: #ddd; margin: 0; padding: 20px; user-select: none; }
         .container { max-width: 1400px; margin: 0 auto; }
@@ -74,33 +74,23 @@
             if (ctx) return;
             ctx = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: 48000 });
             await ctx.audioWorklet.addModule('worklet.js');
-            mixerNode = new AudioWorkletNode(ctx, 'mixer-worklet');
+            mixerNode = new AudioWorkletNode(ctx, 'mixer-worklet', { outputChannelCount: [2] });
             mixerNode.connect(ctx.destination);
             updateWorkletParams();
         }
 
         function updateWorkletParams() {
             if (!mixerNode) return;
-            const params = {
-                masterVol: parseFloat(document.getElementById('vol-master').value),
-                masterMute: false, // could add master mute
-                channels: {}
-            };
+            const params = { masterVol: parseFloat(document.getElementById('vol-master').value), masterMute: false, channels: {} };
             for (let id in channels) {
-                params.channels[id] = {
-                    vol: parseFloat(channels[id].fader.value),
-                    mute: channels[id].mute.classList.contains('active'),
-                    solo: channels[id].solo.classList.contains('active')
-                };
+                params.channels[id] = { vol: parseFloat(channels[id].fader.value), mute: channels[id].mute.classList.contains('active'), solo: channels[id].solo.classList.contains('active') };
             }
             mixerNode.port.postMessage({ type: 'params', data: params });
         }
 
-        ws.onopen = () => { loadSettings(); };
         ws.onmessage = (e) => {
             if (e.data instanceof ArrayBuffer) {
                 if (!monitoring || !mixerNode) return;
-                // Protocol: [Uint32: NumBundles] (Bundle: [8 bytes ID] [Uint32: NumSamples] [F32 Samples])
                 const dv = new DataView(e.data);
                 let offset = 0;
                 const numBundles = dv.getUint32(offset, true); offset += 4;
@@ -134,10 +124,8 @@
             } else send('stop_stream', {});
         };
         document.getElementById('lat-slider').oninput = (e) => {
-            const val = parseInt(e.target.value);
-            document.getElementById('lat-val').textContent = val;
-            send('latency', { value: val });
-            saveSettings();
+            const val = parseInt(e.target.value); document.getElementById('lat-val').textContent = val;
+            send('latency', { value: val }); saveSettings();
         };
         document.getElementById('vol-master').oninput = (e) => { send('volume', { id: 'master', value: parseFloat(e.target.value) }); updateWorkletParams(); saveSettings(); };
 
@@ -160,8 +148,7 @@
                         send('solo', { id: ch.id, value: s.solo });
                     }
                 }
-                const st = channels[ch.id];
-                st.seen = true;
+                const st = channels[ch.id]; st.seen = true;
                 if (document.activeElement !== st.fader) st.fader.value = ch.volume;
                 st.mute.classList.toggle('active', ch.muted); st.solo.classList.toggle('active', ch.soloed);
             });
