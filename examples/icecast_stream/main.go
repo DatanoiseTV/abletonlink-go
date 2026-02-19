@@ -21,7 +21,7 @@ import (
 	"github.com/braheezy/shine-mp3/pkg/mp3"
 )
 
-const AppVersion = "1.2.1-config-metadata"
+const AppVersion = "1.2.2-initial-metadata"
 
 type IcecastConfig struct {
 	Host        string
@@ -103,11 +103,17 @@ func isSupportedMP3Rate(rate int) bool {
 type trackingWriter struct {
 	io.Writer
 	totalEncoded *int64
+	bytesSent    *int64
 }
 
 func (tw trackingWriter) Write(p []byte) (n int, err error) {
 	n, err = tw.Writer.Write(p)
-	atomic.AddInt64(tw.totalEncoded, int64(n))
+	if tw.bytesSent != nil {
+		atomic.AddInt64(tw.bytesSent, int64(n))
+	}
+	if tw.totalEncoded != nil {
+		atomic.AddInt64(tw.totalEncoded, int64(n))
+	}
 	return n, err
 }
 
@@ -152,22 +158,16 @@ func main() {
 	defer dummySink.Destroy()
 
 	var currentBPM int64 = 120000 // Fixed point BPM * 1000
+	
+	// Pre-start heartbeat to pump events
 	go func() {
 		state := abletonlink.NewSessionState()
 		defer state.Destroy()
-		var lastReportedBPM float64
 		for {
 			link.CaptureAppSessionState(state)
 			bpm := state.Tempo()
 			atomic.StoreInt64(&currentBPM, int64(bpm*1000))
-			
-			// Update Icecast metadata if BPM changed significantly
-			if math.Abs(bpm-lastReportedBPM) > 0.1 {
-				lastReportedBPM = bpm
-				status := fmt.Sprintf("%s - %.2f BPM", config.Name, bpm)
-				go updateMetadata(config, status)
-			}
-			time.Sleep(500 * time.Millisecond)
+			time.Sleep(100 * time.Millisecond)
 		}
 	}()
 
@@ -299,9 +299,6 @@ loop:
 	
 	resampler := NewResampler(int(sampleRate), targetRate, int(numChannels))
 	mp3Encoder := mp3.NewEncoder(targetRate, int(numChannels))
-	// Shine-MP3 doesn't have a direct bitrate setter in the encoder struct we can use after creation easily,
-	// but we can modify the wizard to allow selecting it if it were supported by the lib better.
-	// Shine-MP3 defaults to 128kbps in NewEncoder implementation.
 
 	fmt.Printf("Connecting to Icecast at %s:%d/%s...\n", config.Host, config.Port, config.Mount)
 	conn, err := net.Dial("tcp", fmt.Sprintf("%s:%d", config.Host, config.Port))
@@ -335,7 +332,32 @@ loop:
 	}
 	fmt.Println("Icecast connected successfully! Streaming...")
 
-	tw := trackingWriter{Writer: conn, totalEncoded: &totalEncoded}
+	// START METADATA UPDATER NOW
+	go func() {
+		var lastReportedBPM float64
+		// Force initial update
+		bpm := float64(atomic.LoadInt64(&currentBPM)) / 1000.0
+		status := fmt.Sprintf("%s - %.2f BPM", config.Name, bpm)
+		updateMetadata(config, status)
+		lastReportedBPM = bpm
+
+		for {
+			bpm := float64(atomic.LoadInt64(&currentBPM)) / 1000.0
+			if math.Abs(bpm-lastReportedBPM) > 0.1 {
+				lastReportedBPM = bpm
+				status := fmt.Sprintf("%s - %.2f BPM", config.Name, bpm)
+				updateMetadata(config, status)
+			}
+			time.Sleep(1 * time.Second)
+		}
+	}()
+
+	var bytesSent int64
+	tw := trackingWriter{
+		Writer:       conn,
+		totalEncoded: &totalEncoded,
+		bytesSent:    &bytesSent,
+	}
 	frameSize := 1152
 	sampleBuffer := make([]int16, 0, frameSize*int(numChannels)*4)
 
