@@ -282,7 +282,22 @@ func main() {
 	
 	link := abletonlink.NewLinkWithName(120.0, "WebMixer")
 	defer link.Destroy()
+	
+	// Link Callbacks for stdout logging
+	link.SetNumPeersCallback(func(numPeers uint64) {
+		log.Printf("[Link] Connected peers: %d", numPeers)
+	})
+	link.SetTempoCallback(func(tempo float64) {
+		log.Printf("[Link] Tempo changed: %.2f BPM", tempo)
+	})
+	link.SetStartStopCallback(func(isPlaying bool) {
+		status := "stopped"
+		if isPlaying { status = "playing" }
+		log.Printf("[Link] Transport state: %s", status)
+	})
+
 	link.Enable(true); link.EnableAudio(true); link.EnableStartStopSync(true)
+	log.Printf("[Link] Link enabled (Audio: %v)", link.IsAudioEnabled())
 	
 	// Increased dummy sink buffer size for robustness
 	dummySink := link.NewSink("WebMixer", 16384)
