@@ -320,7 +320,7 @@ func main() {
 			mixer.streamMu.Unlock()
 			if hub.hasMonitor() {
 				buf := new(bytes.Buffer)
-				buf.WriteByte(0x01) // Audio Header
+				binary.Write(buf, binary.LittleEndian, uint32(1)) // Type 1: Audio (4 bytes for alignment)
 				binary.Write(buf, binary.LittleEndian, uint32(len(rawChannels)))
 				for id, samples := range rawChannels {
 					var rawID uint64
@@ -338,7 +338,7 @@ func main() {
 	go hub.run(mixer)
 	http.Handle("/", http.FileServer(http.FS(content)))
 	http.HandleFunc("/ws", func(w http.ResponseWriter, r *http.Request) { serveWs(hub, mixer, w, r) })
-	log.Printf("Listening on http://localhost:%d", *port)
+	log.Printf("Listening on :%d", *port)
 	log.Fatal(http.ListenAndServe(fmt.Sprintf(":%d", *port), nil))
 }
 
@@ -353,11 +353,7 @@ type Hub struct {
 func newHub() *Hub { return &Hub{clients: make(map[*Client]bool), register: make(chan *Client), unregister: make(chan *Client)} }
 func (h *Hub) hasMonitor() bool { return atomic.LoadInt32(&h.monCount) > 0 }
 func (h *Hub) broadcastBinary(d []byte, monOnly bool) {
-	for c := range h.clients { 
-		if !monOnly || c.mon {
-			select { case c.send <- d: default: } 
-		}
-	}
+	for c := range h.clients { if !monOnly || c.mon { select { case c.send <- d: default: } } }
 }
 func (h *Hub) run(m *Mixer) {
 	ticker := time.NewTicker(100 * time.Millisecond)
@@ -376,13 +372,11 @@ func (h *Hub) run(m *Mixer) {
 			msg := MixerState{BPM: bpm, Playing: playing, Streaming: m.streaming, Peers: m.Link.NumPeers(), Master: ChannelState{Volume: m.MasterVolume, Muted: m.MasterMuted}, Channels: []ChannelState{}}
 			m.streamMu.Unlock()
 			
-			// Binary Meters
 			mb := new(bytes.Buffer)
-			mb.WriteByte(0x02) // Meter Header
+			binary.Write(mb, binary.LittleEndian, uint32(2)) // Type 2: Meters
 			binary.Write(mb, binary.LittleEndian, uint32(len(m.Channels)+1))
 			binary.Write(mb, binary.LittleEndian, uint64(0)) // Master ID
 			binary.Write(mb, binary.LittleEndian, float32(m.MasterPeak))
-			
 			for _, ch := range m.Channels {
 				msg.Channels = append(msg.Channels, ChannelState{ID: ch.ID, Name: ch.Name, PeerName: ch.PeerName, Volume: ch.Volume, Muted: ch.Muted, Soloed: ch.Soloed})
 				var rawID uint64
@@ -394,7 +388,6 @@ func (h *Hub) run(m *Mixer) {
 			m.mu.RUnlock()
 			sort.Slice(msg.Channels, func(i, j int) bool { return msg.Channels[i].Name < msg.Channels[j].Name })
 			bS, _ := json.Marshal(WSMessage{Type: "state", Data: mustMarshal(msg)})
-			
 			h.broadcastBinary(mb.Bytes(), false)
 			for c := range h.clients { select { case c.send <- bS: default: } }
 		}
@@ -441,9 +434,7 @@ func serveWs(h *Hub, m *Mixer, w http.ResponseWriter, r *http.Request) {
 					var cmd BoolCmd
 					if json.Unmarshal(msg.Data, &cmd) == nil {
 						m.mu.Lock()
-						if ch, ok := m.Channels[cmd.ID]; ok {
-							ch.Soloed = cmd.Value
-						}
+						if ch, ok := m.Channels[cmd.ID]; ok { ch.Soloed = cmd.Value }
 						m.mu.Unlock()
 					}
 				case "latency":

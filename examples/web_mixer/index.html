@@ -90,21 +90,35 @@
 
         ws.onmessage = (e) => {
             if (e.data instanceof ArrayBuffer) {
-                if (!monitoring || !mixerNode) return;
                 const dv = new DataView(e.data);
-                let offset = 0;
-                const numBundles = dv.getUint32(offset, true); offset += 4;
-                for (let i = 0; i < numBundles; i++) {
-                    const id = dv.getBigUint64(offset, true).toString(); offset += 8;
-                    const numSamples = dv.getUint32(offset, true); offset += 4;
-                    const samples = new Float32Array(e.data, offset, numSamples); offset += numSamples * 4;
-                    mixerNode.port.postMessage({ type: 'audio', data: { id, samples } });
+                const type = dv.getUint32(0, true);
+                
+                if (type === 1) { // Audio
+                    if (!monitoring || !mixerNode) return;
+                    let offset = 4;
+                    const numBundles = dv.getUint32(offset, true); offset += 4;
+                    for (let i = 0; i < numBundles; i++) {
+                        const id = dv.getBigUint64(offset, true).toString(); offset += 8;
+                        const numSamples = dv.getUint32(offset, true); offset += 4;
+                        const samples = new Float32Array(e.data, offset, numSamples); offset += numSamples * 4;
+                        mixerNode.port.postMessage({ type: 'audio', data: { id, samples } });
+                    }
+                } else if (type === 2) { // Meters
+                    let offset = 4;
+                    const numMeters = dv.getUint32(offset, true); offset += 4;
+                    const meters = {};
+                    for (let i = 0; i < numMeters; i++) {
+                        const id = dv.getBigUint64(offset, true).toString(); offset += 8;
+                        const val = dv.getFloat32(offset, true); offset += 4;
+                        if (id === "0") meters["master"] = val;
+                        else meters[id] = val;
+                    }
+                    updateMeters(meters);
                 }
                 return;
             }
             const msg = JSON.parse(e.data);
             if (msg.type === 'state') updateState(msg.data);
-            if (msg.type === 'meters') updateMeters(msg.data);
         };
 
         const send = (type, data) => ws.readyState === 1 && ws.send(JSON.stringify({type, data}));
