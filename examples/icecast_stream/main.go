@@ -11,6 +11,7 @@ import (
 	"net/url"
 	"os"
 	"os/signal"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -187,10 +188,7 @@ loop:
 		default:
 			channels := link.Channels()
 			if len(channels) > 0 {
-				fmt.Printf("\nFound %d channel(s):\n", len(channels))
-				for i, ch := range channels {
-					fmt.Printf("%d: %s (Peer: %s, ID: %d)\n", i, ch.Name, ch.PeerName, ch.ID)
-				}
+				printChannelTree(channels)
 				fmt.Printf("\nEnter channel index to stream (or 'r' to refresh): ")
 				input, _ := reader.ReadString('\n')
 				input = strings.TrimSpace(input)
@@ -419,4 +417,47 @@ func wizard() IcecastConfig {
 func readLine(r *bufio.Reader) string {
 	line, _ := r.ReadString('\n')
 	return strings.TrimSpace(line)
+}
+
+type peerGroup struct {
+	id       uint64
+	name     string
+	channels []struct {
+		idx  int
+		name string
+	}
+}
+
+func printChannelTree(channels []abletonlink.Channel) {
+	groups := make(map[uint64]*peerGroup)
+	var peerIDs []uint64
+
+	for i, ch := range channels {
+		if _, ok := groups[ch.PeerID]; !ok {
+			groups[ch.PeerID] = &peerGroup{id: ch.PeerID, name: ch.PeerName}
+			peerIDs = append(peerIDs, ch.PeerID)
+		}
+		groups[ch.PeerID].channels = append(groups[ch.PeerID].channels, struct {
+			idx  int
+			name string
+		}{idx: i, name: ch.Name})
+	}
+
+	// Sort peers by name
+	sort.Slice(peerIDs, func(i, j int) bool {
+		return groups[peerIDs[i]].name < groups[peerIDs[j]].name
+	})
+
+	fmt.Printf("\nFound %d channel(s) across %d peer(s):\n", len(channels), len(peerIDs))
+	for _, pid := range peerIDs {
+		pg := groups[pid]
+		fmt.Printf("Peer: %s (ID: %d)\n", pg.name, pg.id)
+		for i, ch := range pg.channels {
+			prefix := "├── "
+			if i == len(pg.channels)-1 {
+				prefix = "└── "
+			}
+			fmt.Printf("%s%d: %s\n", prefix, ch.idx, ch.name)
+		}
+	}
 }
