@@ -326,7 +326,7 @@ func main() {
 				activeIDs[id] = true
 				if _, ok := mixer.Channels[id]; !ok {
 					log.Printf("[Link] New channel: %s", ch.Name)
-					newStrip := &ChannelStrip{RawID: ch.ID, ID: id, Name: ch.Name, PeerName: ch.PeerName, Volume: 0.8, buffer: make([]int16, 0, 32768), active: true, lastSeen: time.Now()}
+					newStrip := &ChannelStrip{RawID: ch.ID, ID: id, Name: ch.Name, PeerName: ch.PeerName, Volume: 0.8, queue: make([]AudioBuffer, 0, 200), active: true, lastSeen: time.Now()}
 					newStrip.resamp = NewResampler(48000, SampleRate, Channels)
 					s := newStrip
 					newStrip.source = link.NewSource(ch.ID, func(samples []int16, info abletonlink.SourceBufferInfo) {
@@ -370,7 +370,6 @@ func main() {
 					fmt.Sscanf(id, "%d", &rawID)
 					binary.Write(buf, binary.LittleEndian, rawID)
 					binary.Write(buf, binary.LittleEndian, uint32(len(samples)))
-					// Transmit as int16 to save bandwidth (2x reduction over f32)
 					binary.Write(buf, binary.LittleEndian, samples)
 				}
 				data := buf.Bytes()
@@ -421,18 +420,26 @@ func (h *Hub) run(m *Mixer) {
 				Debug: DebugStats{InRate: inRate, OutRate: outRate, IceRate: iceRate, LoadPercent: load, BufferDepth: make(map[string]int)},
 			}
 			m.streamMu.Unlock()
-			mets := make(map[string]float64); mets["master"] = m.MasterPeak
+			mb := new(bytes.Buffer)
+			binary.Write(mb, binary.LittleEndian, uint32(2)) 
+			binary.Write(mb, binary.LittleEndian, uint32(len(m.Channels)+1))
+			binary.Write(mb, binary.LittleEndian, uint64(0)) 
+			binary.Write(mb, binary.LittleEndian, float32(m.MasterPeak))
 			for id, ch := range m.Channels {
 				msg.Channels = append(msg.Channels, ChannelState{ID: ch.ID, Name: ch.Name, PeerName: ch.PeerName, Volume: ch.Volume, Muted: ch.Muted, Soloed: ch.Soloed})
-				mets[ch.ID] = ch.PeakHold; ch.PeakHold = 0
+				var rawID uint64
+				fmt.Sscanf(id, "%d", &rawID)
+				binary.Write(mb, binary.LittleEndian, rawID)
+				binary.Write(mb, binary.LittleEndian, float32(ch.PeakHold))
+				ch.PeakHold = 0
 				msg.Debug.BufferDepth[id] = len(ch.queue)
 			}
 			m.mu.RUnlock()
 			sort.Slice(msg.Channels, func(i, j int) bool { return msg.Channels[i].Name < msg.Channels[j].Name })
 			bS, _ := json.Marshal(WSMessage{Type: "state", Data: mustMarshal(msg)})
-			bM, _ := json.Marshal(WSMessage{Type: "meters", Data: mustMarshal(mets)})
-			atomic.AddInt64(&h.outBytes, int64(len(bS)+len(bM)))
-			for c := range h.clients { select { case c.send <- bS: default: }; select { case c.send <- bM: default: } }
+			h.broadcastBinary(mb.Bytes(), false)
+			atomic.AddInt64(&h.outBytes, int64(len(bS)))
+			for c := range h.clients { select { case c.send <- bS: default: } }
 		}
 	}
 }
@@ -455,21 +462,31 @@ func serveWs(h *Hub, m *Mixer, w http.ResponseWriter, r *http.Request) {
 					var cmd VolumeCmd
 					if json.Unmarshal(msg.Data, &cmd) == nil {
 						m.mu.Lock()
-						if cmd.ID == "master" { m.MasterVolume = cmd.Value } else if ch, ok := m.Channels[cmd.ID]; ok { ch.Volume = cmd.Value }
+						if cmd.ID == "master" {
+							m.MasterVolume = cmd.Value
+						} else if ch, ok := m.Channels[cmd.ID]; ok {
+							ch.Volume = cmd.Value
+						}
 						m.mu.Unlock()
 					}
 				case "mute":
 					var cmd BoolCmd
 					if json.Unmarshal(msg.Data, &cmd) == nil {
 						m.mu.Lock()
-						if cmd.ID == "master" { m.MasterMuted = cmd.Value } else if ch, ok := m.Channels[cmd.ID]; ok { m.Muted = cmd.Value }
+						if cmd.ID == "master" {
+							m.MasterMuted = cmd.Value
+						} else if ch, ok := m.Channels[cmd.ID]; ok {
+							ch.Muted = cmd.Value
+						}
 						m.mu.Unlock()
 					}
 				case "solo":
 					var cmd BoolCmd
 					if json.Unmarshal(msg.Data, &cmd) == nil {
 						m.mu.Lock()
-						if ch, ok := m.Channels[cmd.ID]; ok { ch.Soloed = cmd.Value }
+						if ch, ok := m.Channels[cmd.ID]; ok {
+							ch.Soloed = cmd.Value
+						}
 						m.mu.Unlock()
 					}
 				case "latency":
