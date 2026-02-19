@@ -6,6 +6,7 @@ require (
 	github.com/DatanoiseTV/abletonlink-go v0.0.0
 	github.com/braheezy/shine-mp3 v0.1.0
 	github.com/gdamore/tcell/v2 v2.7.1
+	github.com/gorilla/websocket v1.5.3
 	github.com/rivo/tview v0.0.0-20250501113434-0c592cd31026
 	github.com/sirupsen/logrus v1.9.3
 	github.com/warthog618/go-gpiocdev v0.9.1

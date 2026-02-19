@@ -1,0 +1,236 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Link Mixer</title>
+    <style>
+        body { font-family: "SF Mono", "Monaco", "Inconsolata", monospace; background: #121212; color: #ddd; margin: 0; padding: 20px; user-select: none; }
+        .container { max-width: 1400px; margin: 0 auto; }
+        header { display: flex; justify-content: space-between; align-items: center; padding: 10px 20px; background: #1e1e1e; border-radius: 8px; margin-bottom: 20px; border: 1px solid #333; }
+        .bpm-area { text-align: center; }
+        .bpm-value { font-size: 32px; font-weight: bold; color: #f1c40f; }
+        .bpm-label { font-size: 10px; color: #666; margin-top: -5px; }
+        .main-view { display: flex; gap: 20px; align-items: flex-start; }
+        .mixer-surface { display: flex; gap: 10px; overflow-x: auto; padding-bottom: 20px; flex-grow: 1; }
+        .channel-strip { background: #252525; border: 1px solid #3a3a3a; border-radius: 4px; width: 100px; padding: 15px 10px; display: flex; flex-direction: column; align-items: center; flex-shrink: 0; position: relative; }
+        .channel-strip.master { background: #1a1a1a; border: 2px solid #555; width: 180px; }
+        .label-area { height: 45px; width: 100%; text-align: center; overflow: hidden; margin-bottom: 10px; border-bottom: 1px solid #333; }
+        .peer-name { font-size: 8px; color: #888; text-transform: uppercase; }
+        .ch-name { font-size: 10px; font-weight: bold; color: #fff; margin-top: 2px; }
+        .fader-section { display: flex; height: 220px; align-items: center; gap: 8px; }
+        .meter-bridge { width: 8px; height: 100%; background: #000; border-radius: 1px; position: relative; overflow: hidden; border: 1px solid #222; }
+        .meter-fill { position: absolute; bottom: 0; left: 0; width: 100%; height: 0%; background: linear-gradient(to top, #2ecc71 0%, #2ecc71 75%, #f1c40f 85%, #e74c3c 100%); transition: height 0.08s ease-out; }
+        input[type=range][orient=vertical] { writing-mode: bt-lr; -webkit-appearance: slider-vertical; width: 12px; height: 100%; padding: 0; margin: 0; cursor: pointer; }
+        .buttons { display: grid; grid-template-columns: 1fr 1fr; gap: 4px; width: 100%; margin-top: 15px; }
+        button { background: #333; border: 1px solid #444; color: #999; padding: 6px 2px; border-radius: 3px; font-size: 9px; cursor: pointer; font-weight: bold; }
+        button:hover { background: #444; color: #fff; }
+        button.active { color: #000; }
+        button.mute.active { background: #ff5252; color: #fff; }
+        button.solo.active { background: #ffc107; color: #000; }
+        button.mon.active { background: #00bcd4; color: #000; }
+        button.stream.active { background: #e74c3c; color: #fff; animation: blink 1s infinite; }
+        @keyframes blink { 0% { opacity: 1; } 50% { opacity: 0.6; } 100% { opacity: 1; } }
+        .master-controls { width: 100%; margin-top: 15px; display: flex; flex-direction: column; gap: 8px; }
+        .config-panel { margin-top: 15px; padding-top: 15px; border-top: 1px solid #333; width: 100%; }
+        .config-panel input { background: #000; border: 1px solid #444; color: #0f0; font-family: monospace; font-size: 10px; width: 100%; box-sizing: border-box; padding: 4px; margin-bottom: 5px; }
+        .config-panel label { font-size: 8px; color: #666; display: block; margin-bottom: 2px; }
+        #transport-btn { width: 100%; padding: 10px; font-size: 12px; margin-bottom: 10px; }
+        #transport-btn.playing { background: #2ecc71; color: #000; }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <header>
+            <div>
+                <div style="font-size: 18px; font-weight: bold; letter-spacing: 1px;">LINK WEB MIXER</div>
+                <div id="status" style="font-size: 9px; color: #555;">CONNECTING...</div>
+            </div>
+            <div class="bpm-area">
+                <div class="bpm-value" id="bpm">120.00</div>
+                <div class="bpm-label">BPM</div>
+            </div>
+        </header>
+        <div class="main-view">
+            <div class="mixer-surface" id="mixer"></div>
+            <div class="channel-strip master">
+                <div class="label-area"><div class="peer-name">OUT</div><div class="ch-name">MASTER</div></div>
+                <button id="transport-btn">LINK PLAY</button>
+                <div class="fader-section">
+                    <div class="meter-bridge"><div class="meter-fill" id="meter-master"></div></div>
+                    <input type="range" orient="vertical" min="0" max="1.5" step="0.01" id="vol-master" value="1.0">
+                </div>
+                <div class="master-controls">
+                    <button id="mon-btn" class="mon">MONITOR</button>
+                    <button id="stream-btn" class="stream">STREAM</button>
+                </div>
+                <div class="config-panel">
+                    <label>ICE-HOST</label><input type="text" id="ice-host" value="localhost">
+                    <label>ICE-PORT</label><input type="number" id="ice-port" value="8000">
+                    <label>ICE-USER</label><input type="text" id="ice-user" value="source">
+                    <label>ICE-PASS</label><input type="password" id="ice-pass" value="hackme">
+                    <label>ICE-MOUNT</label><input type="text" id="ice-mount" value="link.mp3">
+                </div>
+            </div>
+        </div>
+    </div>
+    <script>
+        const ws = new WebSocket(`${window.location.protocol==='https:'?'wss:':'ws:'}//${window.location.host}/ws`);
+        ws.binaryType = 'arraybuffer';
+        let channels = {}, ctx = null, nextTime = 0, monitoring = false, localSettings = {};
+
+        function saveSettings() {
+            const config = {
+                host: document.getElementById('ice-host').value,
+                port: document.getElementById('ice-port').value,
+                user: document.getElementById('ice-user').value,
+                pass: document.getElementById('ice-pass').value,
+                mount: document.getElementById('ice-mount').value,
+                masterVol: document.getElementById('vol-master').value,
+                channels: {}
+            };
+            for (let id in channels) {
+                config.channels[id] = {
+                    vol: channels[id].fader.value,
+                    mute: channels[id].mute.classList.contains('active'),
+                    solo: channels[id].solo.classList.contains('active')
+                };
+            }
+            localStorage.setItem('mixerSettings', JSON.stringify(config));
+        }
+
+        function loadSettings() {
+            const saved = localStorage.getItem('mixerSettings');
+            if (saved) {
+                const config = JSON.parse(saved);
+                document.getElementById('ice-host').value = config.host || 'localhost';
+                document.getElementById('ice-port').value = config.port || 8000;
+                document.getElementById('ice-user').value = config.user || 'source';
+                document.getElementById('ice-pass').value = config.pass || 'hackme';
+                document.getElementById('ice-mount').value = config.mount || 'link.mp3';
+                document.getElementById('vol-master').value = config.masterVol || 1.0;
+                localSettings = config.channels || {};
+                // Send master vol immediately if socket open
+                send('volume', { id: 'master', value: parseFloat(document.getElementById('vol-master').value) });
+            }
+        }
+
+        function initAudio() {
+            if (ctx) return;
+            ctx = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: 48000 });
+            nextTime = ctx.currentTime + 0.1;
+        }
+
+        ws.onopen = () => { loadSettings(); };
+        ws.onmessage = (e) => {
+            if (e.data instanceof ArrayBuffer) {
+                if (!monitoring || !ctx) return;
+                const f32 = new Float32Array(e.data);
+                const buf = ctx.createBuffer(2, f32.length/2, 48000);
+                for(let c=0; c<2; c++) {
+                    const data = buf.getChannelData(c);
+                    for(let i=0; i<f32.length/2; i++) data[i] = f32[i*2+c];
+                }
+                const src = ctx.createBufferSource();
+                src.buffer = buf; src.connect(ctx.destination);
+                const now = ctx.currentTime;
+                if (nextTime < now) nextTime = now + 0.02;
+                src.start(nextTime); nextTime += buf.duration;
+                return;
+            }
+            const msg = JSON.parse(e.data);
+            if (msg.type === 'state') updateState(msg.data);
+            if (msg.type === 'meters') updateMeters(msg.data);
+        };
+
+        const send = (type, data) => ws.readyState === 1 && ws.send(JSON.stringify({type, data}));
+
+        document.getElementById('transport-btn').onclick = function() {
+            send('transport', { playing: !this.classList.contains('playing') });
+        };
+
+        document.getElementById('mon-btn').onclick = function() {
+            initAudio(); monitoring = !monitoring;
+            this.classList.toggle('active', monitoring);
+            if (monitoring && ctx.state === 'suspended') ctx.resume();
+            send('monitor', { enabled: monitoring });
+        };
+
+        document.getElementById('stream-btn').onclick = () => {
+            const active = document.getElementById('stream-btn').classList.contains('active');
+            if (!active) {
+                saveSettings();
+                send('start_stream', {
+                    host: document.getElementById('ice-host').value,
+                    port: parseInt(document.getElementById('ice-port').value),
+                    user: document.getElementById('ice-user').value,
+                    pass: document.getElementById('ice-pass').value,
+                    mount: document.getElementById('ice-mount').value
+                });
+            } else send('stop_stream', {});
+        };
+
+        document.querySelectorAll('.config-panel input').forEach(el => el.onchange = saveSettings);
+        document.getElementById('vol-master').oninput = (e) => {
+            send('volume', { id: 'master', value: parseFloat(e.target.value) });
+            saveSettings();
+        };
+
+        function updateState(s) {
+            document.getElementById('bpm').textContent = s.bpm.toFixed(2);
+            document.getElementById('status').textContent = `PEERS: ${s.peers} | ${s.streaming ? 'STREAMING' : 'IDLE'}`;
+            const tb = document.getElementById('transport-btn');
+            tb.classList.toggle('playing', s.playing);
+            tb.textContent = s.playing ? 'LINK STOP' : 'LINK PLAY';
+            document.getElementById('stream-btn').classList.toggle('active', s.streaming);
+            document.getElementById('stream-btn').textContent = s.streaming ? 'STOP STREAM' : 'START STREAM';
+            
+            for (let id in channels) channels[id].seen = false;
+            s.channels.forEach(ch => {
+                if (!channels[ch.id]) {
+                    createStrip(ch);
+                    // Apply saved settings for new channel if exists
+                    if (localSettings[ch.id]) {
+                        const s = localSettings[ch.id];
+                        send('volume', { id: ch.id, value: parseFloat(s.vol) });
+                        send('mute', { id: ch.id, value: s.mute });
+                        send('solo', { id: ch.id, value: s.solo });
+                    }
+                }
+                const st = channels[ch.id];
+                st.seen = true;
+                if (document.activeElement !== st.fader) st.fader.value = ch.volume;
+                st.mute.classList.toggle('active', ch.muted);
+                st.solo.classList.toggle('active', ch.soloed);
+            });
+            for (let id in channels) if (!channels[id].seen) { channels[id].el.remove(); delete channels[id]; }
+        }
+
+        function createStrip(ch) {
+            const el = document.createElement('div');
+            el.className = 'channel-strip';
+            el.innerHTML = `
+                <div class="label-area"><div class="peer-name">${ch.peer_name}</div><div class="ch-name">${ch.name}</div></div>
+                <div class="fader-section">
+                    <div class="meter-bridge"><div class="meter-fill"></div></div>
+                    <input type="range" orient="vertical" min="0" max="1.5" step="0.01" value="${ch.volume}">
+                </div>
+                <div class="buttons"><button class="mute">M</button><button class="solo">S</button></div>
+            `;
+            document.getElementById('mixer').appendChild(el);
+            const fader = el.querySelector('input'), mute = el.querySelector('.mute'), solo = el.querySelector('.solo');
+            fader.oninput = () => { send('volume', { id: ch.id, value: parseFloat(fader.value) }); saveSettings(); };
+            mute.onclick = () => { send('mute', { id: ch.id, value: !mute.classList.contains('active') }); saveSettings(); };
+            solo.onclick = () => { send('solo', { id: ch.id, value: !solo.classList.contains('active') }); saveSettings(); };
+            channels[ch.id] = { el, fader, mute, solo, meter: el.querySelector('.meter-fill') };
+        }
+
+        function updateMeters(m) {
+            for (let id in m) {
+                const target = id === 'master' ? document.getElementById('meter-master') : channels[id]?.meter;
+                if (target) target.style.height = `${Math.min(100, m[id]*100)}%`;
+            }
+        }
+    </script>
+</body>
+</html>
